@@ -39,6 +39,10 @@ impl Tab {
         self.pty.dup_output_read()
     }
 
+    pub fn dup_process_handle(&self) -> io::Result<HANDLE> {
+        self.pty.dup_process_handle()
+    }
+
     pub fn process_pty_output(&mut self, data: &[u8]) {
         self.term.process(data);
     }

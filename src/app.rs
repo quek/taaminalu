@@ -15,7 +15,7 @@ pub struct App {
 
 impl App {
     pub fn new(cols: usize, rows: usize) -> io::Result<Self> {
-        let tab = Tab::new(cols, rows, ShellType::Wsl)?;
+        let tab = Tab::new(cols, rows, ShellType::Cmd)?;
         Ok(Self {
             tabs: vec![tab],
             active_tab: 0,

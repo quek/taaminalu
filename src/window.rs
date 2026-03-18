@@ -11,6 +11,7 @@ use windows::Win32::Foundation::{
 use windows::Win32::Graphics::Gdi::InvalidateRect;
 use windows::Win32::Storage::FileSystem::ReadFile;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Threading::{WaitForSingleObject, INFINITE};
 use windows::Win32::System::DataExchange::GetClipboardData;
 use windows::Win32::System::DataExchange::{CloseClipboard, OpenClipboard};
 use windows::Win32::System::Memory::GlobalLock;
@@ -202,6 +203,33 @@ pub(crate) fn start_pty_reader(
         unsafe {
             let _ = CloseHandle(read_handle);
             // PTY が終了したことを通知
+            let _ = PostMessageW(
+                Some(hwnd),
+                WM_TAB_CLOSED,
+                WPARAM(tab_id as usize),
+                LPARAM(0),
+            );
+        }
+    });
+}
+
+/// プロセス終了を監視するスレッドを起動
+/// プロセスが終了したら WM_TAB_CLOSED を送信し、Tab の Drop で ConPTY が閉じられ
+/// ReadFile がエラーになってリーダースレッドも終了する
+pub(crate) fn start_process_watcher(
+    hwnd: HWND,
+    process_handle: HANDLE,
+    tab_id: TabId,
+) {
+    let hwnd_val = hwnd.0 as usize;
+    let handle_val = process_handle.0 as usize;
+
+    thread::spawn(move || {
+        let hwnd = HWND(hwnd_val as *mut _);
+        let process_handle = HANDLE(handle_val as *mut _);
+        unsafe {
+            WaitForSingleObject(process_handle, INFINITE);
+            let _ = CloseHandle(process_handle);
             let _ = PostMessageW(
                 Some(hwnd),
                 WM_TAB_CLOSED,
@@ -484,7 +512,7 @@ fn create_new_tab(hwnd: HWND, shell: ShellType) {
         None => return,
     };
 
-    let (tab_id, read_handle) = {
+    let (tab_id, read_handle, process_handle) = {
         let mut app_lock = app.lock().unwrap();
         let (cols, rows) = app_lock.grid_size();
         let tab_id = match app_lock.add_tab(shell, cols, rows) {
@@ -494,20 +522,26 @@ fn create_new_tab(hwnd: HWND, shell: ShellType) {
                 return;
             }
         };
-        let read_handle = {
-            let tab = app_lock.tabs.iter().find(|t| t.id == tab_id).unwrap();
-            match tab.dup_output_read() {
-                Ok(h) => h,
-                Err(e) => {
-                    eprintln!("[taaminalu] Failed to dup read handle: {}", e);
-                    return;
-                }
+        let tab = app_lock.tabs.iter().find(|t| t.id == tab_id).unwrap();
+        let read_handle = match tab.dup_output_read() {
+            Ok(h) => h,
+            Err(e) => {
+                eprintln!("[taaminalu] Failed to dup read handle: {}", e);
+                return;
             }
         };
-        (tab_id, read_handle)
+        let process_handle = match tab.dup_process_handle() {
+            Ok(h) => h,
+            Err(e) => {
+                eprintln!("[taaminalu] Failed to dup process handle: {}", e);
+                return;
+            }
+        };
+        (tab_id, read_handle, process_handle)
     };
 
     start_pty_reader(Arc::clone(&app), hwnd, read_handle, tab_id);
+    start_process_watcher(hwnd, process_handle, tab_id);
     unsafe { let _ = InvalidateRect(Some(hwnd), None, false); }
     notify_tsf_change(hwnd);
 }

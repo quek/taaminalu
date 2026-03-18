@@ -52,14 +52,16 @@ fn main() {
     window::set_tsf_context(hwnd, tsf_ctx);
 
     // 初期タブの PTY 読み取りスレッド
-    let (tab_id, pty_read_handle) = {
+    let (tab_id, pty_read_handle, process_handle) = {
         let app_lock = app.lock().unwrap();
         let tab = &app_lock.tabs[0];
         let id = tab.id;
-        let handle = tab.dup_output_read().expect("Failed to duplicate PTY read handle");
-        (id, handle)
+        let read_h = tab.dup_output_read().expect("Failed to duplicate PTY read handle");
+        let proc_h = tab.dup_process_handle().expect("Failed to duplicate process handle");
+        (id, read_h, proc_h)
     };
     window::start_pty_reader(Arc::clone(&app), hwnd, pty_read_handle, tab_id);
+    window::start_process_watcher(hwnd, process_handle, tab_id);
 
     // メッセージループ
     window::run_message_loop();

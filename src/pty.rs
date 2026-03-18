@@ -193,6 +193,17 @@ impl Pty {
         }
     }
 
+    /// プロセスハンドルを複製して返す（プロセス監視スレッド用）
+    pub fn dup_process_handle(&self) -> io::Result<HANDLE> {
+        let mut dup = HANDLE::default();
+        unsafe {
+            let process = GetCurrentProcess();
+            DuplicateHandle(process, self.process, process, &mut dup, 0, false, DUPLICATE_SAME_ACCESS)
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        }
+        Ok(dup)
+    }
+
     /// 読み取りハンドルを複製して返す（読み取りスレッド用）
     pub fn dup_output_read(&self) -> io::Result<HANDLE> {
         let mut dup = HANDLE::default();
