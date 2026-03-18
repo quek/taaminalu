@@ -86,6 +86,10 @@ impl App {
         self.active().term.screen_text()
     }
 
+    pub fn screen_text_utf16_len(&self) -> usize {
+        self.active().term.screen_text_utf16_len()
+    }
+
     pub fn cursor_acp(&self) -> usize {
         self.active().term.cursor_acp()
     }

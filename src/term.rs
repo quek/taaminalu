@@ -78,6 +78,27 @@ impl TermWrapper {
         text
     }
 
+    /// screen_text の UTF-16 長を String を作らずに計算
+    pub fn screen_text_utf16_len(&self) -> usize {
+        let grid = self.term.grid();
+        let cols = grid.columns();
+        let lines = grid.screen_lines();
+        let mut len = 0usize;
+        for line_idx in 0..lines {
+            let row = &grid[Line(line_idx as i32)];
+            for col in 0..cols {
+                let cell = &row[Column(col)];
+                if !cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                    len += cell.c.len_utf16();
+                }
+            }
+            if line_idx + 1 < lines {
+                len += 1;
+            }
+        }
+        len
+    }
+
     /// グリッド座標 (row, col) を ACP (screen_text 内のオフセット) に変換
     pub fn grid_to_acp(&self, target_row: usize, target_col: usize) -> usize {
         let grid = self.term.grid();

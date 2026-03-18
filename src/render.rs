@@ -1,3 +1,6 @@
+use std::cell::RefCell;
+use std::collections::HashMap;
+
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_COLOR_F, D2D_RECT_F, D2D_SIZE_U,
@@ -5,7 +8,7 @@ use windows::Win32::Graphics::Direct2D::Common::{
 use windows::Win32::Graphics::Direct2D::{
     D2D1CreateFactory, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_FACTORY_TYPE_SINGLE_THREADED,
     D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_PROPERTIES, ID2D1Factory,
-    ID2D1HwndRenderTarget,
+    ID2D1HwndRenderTarget, ID2D1SolidColorBrush,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL,
@@ -146,6 +149,7 @@ pub struct Renderer {
     tab_text_format: IDWriteTextFormat,
     pub cell_width: f32,
     pub cell_height: f32,
+    brush_cache: RefCell<HashMap<u32, ID2D1SolidColorBrush>>,
 }
 
 impl Renderer {
@@ -199,7 +203,7 @@ impl Renderer {
 
         let (cell_width, cell_height) = Self::measure_cell(&dwrite_factory, &text_format)?;
 
-        Ok(Self { rt, dwrite_factory, text_format, tab_text_format, cell_width, cell_height })
+        Ok(Self { rt, dwrite_factory, text_format, tab_text_format, cell_width, cell_height, brush_cache: RefCell::new(HashMap::new()) })
     }
 
     fn measure_cell(
@@ -215,6 +219,7 @@ impl Renderer {
 
     pub fn resize(&self, width: u32, height: u32) {
         let _ = unsafe { self.rt.Resize(&D2D_SIZE_U { width, height }) };
+        self.brush_cache.borrow_mut().clear();
     }
 
     pub fn tab_bar_height(&self) -> f32 {
@@ -332,7 +337,7 @@ impl Renderer {
             if let Ok(layout) = self.dwrite_factory.CreateTextLayout(
                 &wide, &self.text_format, preedit_pixel_width, self.cell_height,
             ) {
-                if let Ok(brush) = self.rt.CreateSolidColorBrush(&fg, None) {
+                if let Some(brush) = self.get_brush(&fg) {
                     self.rt.DrawTextLayout(
                         windows_numerics::Vector2 { X: x, Y: y },
                         &layout, &brush, D2D1_DRAW_TEXT_OPTIONS_NONE,
@@ -415,11 +420,11 @@ impl Renderer {
                     // テキスト
                     if c != ' ' && c != '\0' {
                         let fg = if is_cursor { BG_COLOR } else { color_to_d2d(&cell.fg) };
-                        let text: Vec<u16> = [c as u16].to_vec();
+                        let text = [c as u16];
                         if let Ok(layout) = self.dwrite_factory.CreateTextLayout(
                             &text, &self.text_format, cell_w, self.cell_height,
                         ) {
-                            if let Ok(brush) = self.rt.CreateSolidColorBrush(&fg, None) {
+                            if let Some(brush) = self.get_brush(&fg) {
                                 self.rt.DrawTextLayout(
                                     windows_numerics::Vector2 { X: x, Y: y },
                                     &layout, &brush, D2D1_DRAW_TEXT_OPTIONS_NONE,
@@ -434,10 +439,25 @@ impl Renderer {
 
     // --- 描画ヘルパー ---
 
+    /// 色からキャッシュ済み Brush を取得（なければ生成してキャッシュ）
+    fn get_brush(&self, color: &D2D1_COLOR_F) -> Option<ID2D1SolidColorBrush> {
+        let key = ((color.r * 255.0) as u32) << 24
+                | ((color.g * 255.0) as u32) << 16
+                | ((color.b * 255.0) as u32) << 8
+                | ((color.a * 255.0) as u32);
+        let mut cache = self.brush_cache.borrow_mut();
+        if let Some(brush) = cache.get(&key) {
+            return Some(brush.clone());
+        }
+        let brush = unsafe { self.rt.CreateSolidColorBrush(color, None).ok()? };
+        cache.insert(key, brush.clone());
+        Some(brush)
+    }
+
     /// 矩形を塗りつぶし
     unsafe fn fill_rect(&self, left: f32, top: f32, right: f32, bottom: f32, color: &D2D1_COLOR_F) {
         unsafe {
-            if let Ok(brush) = self.rt.CreateSolidColorBrush(color, None) {
+            if let Some(brush) = self.get_brush(color) {
                 self.rt.FillRectangle(&D2D_RECT_F { left, top, right, bottom }, &brush);
             }
         }
@@ -448,7 +468,7 @@ impl Renderer {
         unsafe {
             let wide: Vec<u16> = text.encode_utf16().collect();
             if let Ok(layout) = self.dwrite_factory.CreateTextLayout(&wide, format, width, height) {
-                if let Ok(brush) = self.rt.CreateSolidColorBrush(color, None) {
+                if let Some(brush) = self.get_brush(color) {
                     self.rt.DrawTextLayout(
                         windows_numerics::Vector2 { X: x, Y: y },
                         &layout, &brush, D2D1_DRAW_TEXT_OPTIONS_NONE,

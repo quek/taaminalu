@@ -87,10 +87,10 @@ impl TextStore {
 
     /// preedit 文字列内の UTF-16 オフセットを表示カラム数に変換
     fn preedit_utf16_offset_to_cols(&self, utf16_offset: i32) -> usize {
-        let preedit = self.composition.lock().unwrap().preedit.clone();
+        let comp = self.composition.lock().unwrap();
         let mut utf16_count = 0i32;
         let mut cols = 0usize;
-        for c in preedit.chars() {
+        for c in comp.preedit.chars() {
             if utf16_count >= utf16_offset {
                 break;
             }
@@ -279,15 +279,17 @@ impl ITextStoreACP_Impl for TextStore_Impl {
         let slice = unsafe { std::slice::from_raw_parts(pchtext.0, cch as usize) };
         let text = String::from_utf16_lossy(slice);
 
-        let composing = self.composition.lock().unwrap().composing;
-        if composing {
-            // Composition 中: preedit を更新するだけ（PTY には送信しない）
-            self.composition.lock().unwrap().preedit = text;
-            self.invalidate();
-        } else {
-            // Composition 外: PTY に直接送信
-            let app = self.app.lock().unwrap();
-            let _ = app.write_pty(text.as_bytes());
+        {
+            let mut comp = self.composition.lock().unwrap();
+            if comp.composing {
+                comp.preedit = text;
+                drop(comp);
+                self.invalidate();
+            } else {
+                drop(comp);
+                let app = self.app.lock().unwrap();
+                let _ = app.write_pty(text.as_bytes());
+            }
         }
 
         Ok(TS_TEXTCHANGE {
@@ -341,9 +343,11 @@ impl ITextStoreACP_Impl for TextStore_Impl {
         pacpend: *mut i32,
         pchange: *mut TS_TEXTCHANGE,
     ) -> Result<()> {
-        let composing = self.composition.lock().unwrap().composing;
+        let (composing, preedit_len) = {
+            let comp = self.composition.lock().unwrap();
+            (comp.composing, comp.preedit.encode_utf16().count() as i32)
+        };
         let base_acp = self.base_cursor_acp();
-        let preedit_len = self.composition.lock().unwrap().preedit.encode_utf16().count() as i32;
         // composition 中は preedit 末尾が挿入点
         let insert_acp = base_acp + preedit_len;
 
@@ -547,8 +551,7 @@ impl TsfContext {
             if mask & TS_AS_TEXT_CHANGE != 0 {
                 let end_acp = {
                     let app = self.app.lock().unwrap();
-                    let text = app.screen_text();
-                    text.encode_utf16().count() as i32
+                    app.screen_text_utf16_len() as i32
                 };
                 let change = TS_TEXTCHANGE {
                     acpStart: 0,
