@@ -68,7 +68,9 @@ fn main() {
     }
 
     // TSF セットアップ
-    let _tsf = tsf::setup_tsf(Arc::clone(&app), hwnd);
+    let tsf_ctx = tsf::setup_tsf(Arc::clone(&app), hwnd).ok();
+    // TSF コンテキストを window に保存（WM_PTY_OUTPUT で通知に使う）
+    window::set_tsf_context(hwnd, tsf_ctx);
 
     // PTY 読み取りスレッド（ハンドルを複製してロック不要にする）
     let pty_read_handle = {

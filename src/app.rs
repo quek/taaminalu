@@ -65,8 +65,16 @@ impl App {
         self.term.cursor_pos()
     }
 
+    pub fn cursor_acp(&self) -> usize {
+        self.term.cursor_acp()
+    }
+
     pub fn columns(&self) -> usize {
         self.term.columns()
+    }
+
+    pub fn acp_to_grid(&self, acp: usize) -> (usize, usize) {
+        self.term.acp_to_grid(acp)
     }
 
     pub fn cell_size(&self) -> (f32, f32) {

@@ -8,23 +8,27 @@ use windows::Win32::UI::TextServices::*;
 
 use crate::app::App;
 
+/// 共有 TSF シンク（TextStore と外部通知コードの両方からアクセス）
+pub struct SharedSink {
+    pub sink: Option<ITextStoreACPSink>,
+    pub mask: u32,
+}
+
 /// TSF ITextStoreACP 実装
 #[implement(ITextStoreACP)]
 pub struct TextStore {
     app: Arc<Mutex<App>>,
     hwnd: HWND,
-    sink: Mutex<Option<ITextStoreACPSink>>,
-    sink_mask: Mutex<u32>,
+    shared_sink: Arc<Mutex<SharedSink>>,
     lock_flags: Mutex<u32>,
 }
 
 impl TextStore {
-    pub fn new(app: Arc<Mutex<App>>, hwnd: HWND) -> Self {
+    pub fn new(app: Arc<Mutex<App>>, hwnd: HWND, shared_sink: Arc<Mutex<SharedSink>>) -> Self {
         Self {
             app,
             hwnd,
-            sink: Mutex::new(None),
-            sink_mask: Mutex::new(0),
+            shared_sink,
             lock_flags: Mutex::new(0),
         }
     }
@@ -34,22 +38,9 @@ impl TextStore {
         app.screen_text()
     }
 
-    fn get_cursor(&self) -> (usize, usize) {
-        let app = self.app.lock().unwrap();
-        app.cursor_pos()
-    }
-
-    fn get_cols(&self) -> usize {
-        let app = self.app.lock().unwrap();
-        app.columns()
-    }
-
-    /// カーソル位置を ACP (文字列内のオフセット) に変換
     fn cursor_to_acp(&self) -> i32 {
-        let (row, col) = self.get_cursor();
-        let cols = self.get_cols();
-        // 各行は cols 文字 + 改行 で cols+1
-        (row * (cols + 1) + col) as i32
+        let app = self.app.lock().unwrap();
+        app.cursor_acp() as i32
     }
 }
 
@@ -61,19 +52,21 @@ impl ITextStoreACP_Impl for TextStore_Impl {
         dwmask: u32,
     ) -> Result<()> {
         let sink: ITextStoreACPSink = punk.ok()?.cast()?;
-        *self.sink.lock().unwrap() = Some(sink);
-        *self.sink_mask.lock().unwrap() = dwmask;
+        let mut shared = self.shared_sink.lock().unwrap();
+        shared.sink = Some(sink);
+        shared.mask = dwmask;
         Ok(())
     }
 
     fn UnadviseSink(&self, _punk: Ref<IUnknown>) -> Result<()> {
-        *self.sink.lock().unwrap() = None;
-        *self.sink_mask.lock().unwrap() = 0;
+        let mut shared = self.shared_sink.lock().unwrap();
+        shared.sink = None;
+        shared.mask = 0;
         Ok(())
     }
 
     fn RequestLock(&self, dwlockflags: u32) -> Result<HRESULT> {
-        let sink = self.sink.lock().unwrap().clone();
+        let sink = self.shared_sink.lock().unwrap().sink.clone();
         if let Some(sink) = sink {
             *self.lock_flags.lock().unwrap() = dwlockflags;
             let hr = unsafe {
@@ -133,7 +126,6 @@ impl ITextStoreACP_Impl for TextStore_Impl {
     }
 
     fn SetSelection(&self, _ulcount: u32, _pselection: *const TS_SELECTION_ACP) -> Result<()> {
-        // ターミナルのカーソルは直接操作不可
         Ok(())
     }
 
@@ -187,7 +179,6 @@ impl ITextStoreACP_Impl for TextStore_Impl {
         pchtext: &PCWSTR,
         cch: u32,
     ) -> Result<TS_TEXTCHANGE> {
-        // IME からの入力を PTY に転送
         let slice = unsafe { std::slice::from_raw_parts(pchtext.0, cch as usize) };
         let text = String::from_utf16_lossy(slice);
         let app = self.app.lock().unwrap();
@@ -258,7 +249,6 @@ impl ITextStoreACP_Impl for TextStore_Impl {
             return Ok(());
         }
 
-        // テキストを PTY に送信
         let slice = unsafe { std::slice::from_raw_parts(pchtext.0, cch as usize) };
         let text = String::from_utf16_lossy(slice);
         let app = self.app.lock().unwrap();
@@ -291,62 +281,29 @@ impl ITextStoreACP_Impl for TextStore_Impl {
         Err(E_NOTIMPL.into())
     }
 
-    fn RequestSupportedAttrs(
-        &self,
-        _dwflags: u32,
-        _cfilterattrs: u32,
-        _pafilterattrs: *const GUID,
-    ) -> Result<()> {
+    fn RequestSupportedAttrs(&self, _dwflags: u32, _cfilterattrs: u32, _pafilterattrs: *const GUID) -> Result<()> {
         Ok(())
     }
 
-    fn RequestAttrsAtPosition(
-        &self,
-        _acppos: i32,
-        _cfilterattrs: u32,
-        _pafilterattrs: *const GUID,
-        _dwflags: u32,
-    ) -> Result<()> {
+    fn RequestAttrsAtPosition(&self, _acppos: i32, _cfilterattrs: u32, _pafilterattrs: *const GUID, _dwflags: u32) -> Result<()> {
         Ok(())
     }
 
-    fn RequestAttrsTransitioningAtPosition(
-        &self,
-        _acppos: i32,
-        _cfilterattrs: u32,
-        _pafilterattrs: *const GUID,
-        _dwflags: u32,
-    ) -> Result<()> {
+    fn RequestAttrsTransitioningAtPosition(&self, _acppos: i32, _cfilterattrs: u32, _pafilterattrs: *const GUID, _dwflags: u32) -> Result<()> {
         Ok(())
     }
 
     fn FindNextAttrTransition(
-        &self,
-        _acpstart: i32,
-        _acphalt: i32,
-        _cfilterattrs: u32,
-        _pafilterattrs: *const GUID,
-        _dwflags: u32,
-        pacpnext: *mut i32,
-        pffound: *mut BOOL,
-        _plfoundoffset: *mut i32,
+        &self, _acpstart: i32, _acphalt: i32, _cfilterattrs: u32,
+        _pafilterattrs: *const GUID, _dwflags: u32,
+        pacpnext: *mut i32, pffound: *mut BOOL, _plfoundoffset: *mut i32,
     ) -> Result<()> {
-        unsafe {
-            *pacpnext = 0;
-            *pffound = FALSE;
-        }
+        unsafe { *pacpnext = 0; *pffound = FALSE; }
         Ok(())
     }
 
-    fn RetrieveRequestedAttrs(
-        &self,
-        _ulcount: u32,
-        _paattrvals: *mut TS_ATTRVAL,
-        pcfetched: *mut u32,
-    ) -> Result<()> {
-        unsafe {
-            *pcfetched = 0;
-        }
+    fn RetrieveRequestedAttrs(&self, _ulcount: u32, _paattrvals: *mut TS_ATTRVAL, pcfetched: *mut u32) -> Result<()> {
+        unsafe { *pcfetched = 0; }
         Ok(())
     }
 
@@ -356,71 +313,34 @@ impl ITextStoreACP_Impl for TextStore_Impl {
         Ok(len as i32)
     }
 
-    fn GetActiveView(&self) -> Result<u32> {
-        Ok(1) // 固定ビューID
-    }
+    fn GetActiveView(&self) -> Result<u32> { Ok(1) }
 
-    fn GetACPFromPoint(
-        &self,
-        _vcview: u32,
-        ptscreen: *const POINT,
-        _dwflags: u32,
-    ) -> Result<i32> {
+    fn GetACPFromPoint(&self, _vcview: u32, ptscreen: *const POINT, _dwflags: u32) -> Result<i32> {
         let pt = unsafe { *ptscreen };
         let app = self.app.lock().unwrap();
         let (cell_w, cell_h) = app.cell_size();
-        let cols = app.columns();
-
-        // スクリーン座標 → クライアント座標変換
         let mut client_pt = pt;
-        unsafe {
-            let _ = ScreenToClient(self.hwnd, &mut client_pt);
-        }
-
+        unsafe { let _ = ScreenToClient(self.hwnd, &mut client_pt); }
         let col = (client_pt.x as f32 / cell_w) as usize;
         let row = (client_pt.y as f32 / cell_h) as usize;
-        let acp = row * (cols + 1) + col;
+        let acp = app.term.grid_to_acp(row, col);
         Ok(acp as i32)
     }
 
-    fn GetTextExt(
-        &self,
-        _vcview: u32,
-        acpstart: i32,
-        acpend: i32,
-        prc: *mut RECT,
-        pfclipped: *mut BOOL,
-    ) -> Result<()> {
+    fn GetTextExt(&self, _vcview: u32, acpstart: i32, acpend: i32, prc: *mut RECT, pfclipped: *mut BOOL) -> Result<()> {
         let app = self.app.lock().unwrap();
         let (cell_w, cell_h) = app.cell_size();
-        let cols = app.columns();
-
-        if cols == 0 {
-            return Err(E_FAIL.into());
-        }
-
-        let start_row = acpstart as usize / (cols + 1);
-        let start_col = acpstart as usize % (cols + 1);
-        let end_row = acpend as usize / (cols + 1);
-        let end_col = acpend as usize % (cols + 1);
-
+        let (start_row, start_col) = app.acp_to_grid(acpstart as usize);
+        let (end_row, end_col) = app.acp_to_grid(acpend as usize);
         let mut rect = RECT {
             left: (start_col as f32 * cell_w) as i32,
             top: (start_row as f32 * cell_h) as i32,
             right: (end_col as f32 * cell_w) as i32,
             bottom: ((end_row + 1) as f32 * cell_h) as i32,
         };
-
-        // クライアント座標 → スクリーン座標
         unsafe {
             let _ = ClientToScreen(self.hwnd, &mut rect as *mut RECT as *mut POINT);
-            let _ = ClientToScreen(
-                self.hwnd,
-                &mut *(&mut rect.right as *mut i32 as *mut POINT),
-            );
-        }
-
-        unsafe {
+            let _ = ClientToScreen(self.hwnd, &mut *(&mut rect.right as *mut i32 as *mut POINT));
             *prc = rect;
             *pfclipped = FALSE;
         }
@@ -432,16 +352,52 @@ impl ITextStoreACP_Impl for TextStore_Impl {
         unsafe {
             let _ = GetClientRect(self.hwnd, &mut rect);
             let _ = ClientToScreen(self.hwnd, &mut rect as *mut RECT as *mut POINT);
-            let _ = ClientToScreen(
-                self.hwnd,
-                &mut *(&mut rect.right as *mut i32 as *mut POINT),
-            );
+            let _ = ClientToScreen(self.hwnd, &mut *(&mut rect.right as *mut i32 as *mut POINT));
         }
         Ok(rect)
     }
 
-    fn GetWnd(&self, _vcview: u32) -> Result<HWND> {
-        Ok(self.hwnd)
+    fn GetWnd(&self, _vcview: u32) -> Result<HWND> { Ok(self.hwnd) }
+}
+
+/// TSF セットアップの戻り値
+pub struct TsfContext {
+    pub _thread_mgr: ITfThreadMgr,
+    pub _doc_mgr: ITfDocumentMgr,
+    pub shared_sink: Arc<Mutex<SharedSink>>,
+    app: Arc<Mutex<App>>,
+}
+
+// COM オブジェクトはメインスレッド (STA) でのみ使用するため安全
+unsafe impl Send for TsfContext {}
+unsafe impl Sync for TsfContext {}
+
+impl TsfContext {
+    /// PTY出力後にテキスト変更を TSF シンクに通知
+    pub fn notify_change(&self) {
+        // ロックを先にドロップしてからコールバック（デッドロック防止）
+        let (sink, mask) = {
+            let shared = self.shared_sink.lock().unwrap();
+            (shared.sink.clone(), shared.mask)
+        };
+        if let Some(sink) = sink {
+            if mask & TS_AS_TEXT_CHANGE != 0 {
+                let end_acp = {
+                    let app = self.app.lock().unwrap();
+                    let text = app.screen_text();
+                    text.encode_utf16().count() as i32
+                };
+                let change = TS_TEXTCHANGE {
+                    acpStart: 0,
+                    acpOldEnd: end_acp,
+                    acpNewEnd: end_acp,
+                };
+                unsafe { let _ = sink.OnTextChange(TEXT_STORE_TEXT_CHANGE_FLAGS(0), &change); }
+            }
+            if mask & TS_AS_SEL_CHANGE != 0 {
+                unsafe { let _ = sink.OnSelectionChange(); }
+            }
+        }
     }
 }
 
@@ -449,7 +405,7 @@ impl ITextStoreACP_Impl for TextStore_Impl {
 pub fn setup_tsf(
     app: Arc<Mutex<App>>,
     hwnd: HWND,
-) -> Result<(ITfThreadMgr, ITfDocumentMgr, u32)> {
+) -> Result<TsfContext> {
     let thread_mgr: ITfThreadMgr = unsafe {
         windows::Win32::System::Com::CoCreateInstance(
             &CLSID_TF_ThreadMgr,
@@ -459,31 +415,26 @@ pub fn setup_tsf(
     };
 
     let client_id = unsafe { thread_mgr.Activate()? };
-
     let doc_mgr = unsafe { thread_mgr.CreateDocumentMgr()? };
 
-    let text_store = TextStore::new(app, hwnd);
+    let shared_sink = Arc::new(Mutex::new(SharedSink { sink: None, mask: 0 }));
+    let text_store = TextStore::new(Arc::clone(&app), hwnd, Arc::clone(&shared_sink));
     let text_store_unk: IUnknown = text_store.into();
 
     let mut context: Option<ITfContext> = None;
     let mut edit_cookie = 0u32;
     unsafe {
-        doc_mgr.CreateContext(
-            client_id,
-            0,
-            &text_store_unk,
-            &mut context,
-            &mut edit_cookie,
-        )?;
+        doc_mgr.CreateContext(client_id, 0, &text_store_unk, &mut context, &mut edit_cookie)?;
         if let Some(ref ctx) = context {
             doc_mgr.Push(ctx)?;
         }
-    }
-
-    // フォーカスを設定
-    unsafe {
         thread_mgr.SetFocus(&doc_mgr)?;
     }
 
-    Ok((thread_mgr, doc_mgr, client_id))
+    Ok(TsfContext {
+        _thread_mgr: thread_mgr,
+        _doc_mgr: doc_mgr,
+        shared_sink,
+        app,
+    })
 }

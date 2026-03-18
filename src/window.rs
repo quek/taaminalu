@@ -1,4 +1,5 @@
-use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::InvalidateRect;
@@ -6,6 +7,7 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::app::App;
+use crate::tsf::TsfContext;
 
 const CLASS_NAME: &str = "TaaminaluWindow";
 const WINDOW_TITLE: &str = "taaminalu";
@@ -14,6 +16,26 @@ const DEFAULT_HEIGHT: i32 = 600;
 
 /// カスタムメッセージ: PTY からデータ受信で再描画要求
 pub const WM_PTY_OUTPUT: u32 = WM_USER + 1;
+
+/// HWND ごとの TSF コンテキスト
+static TSF_CONTEXTS: OnceLock<Mutex<HashMap<isize, TsfContext>>> = OnceLock::new();
+
+pub fn set_tsf_context(hwnd: HWND, ctx: Option<TsfContext>) {
+    let map = TSF_CONTEXTS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut map = map.lock().unwrap();
+    if let Some(ctx) = ctx {
+        map.insert(hwnd.0 as isize, ctx);
+    }
+}
+
+fn notify_tsf_change(hwnd: HWND) {
+    if let Some(map) = TSF_CONTEXTS.get() {
+        let map = map.lock().unwrap();
+        if let Some(ctx) = map.get(&(hwnd.0 as isize)) {
+            ctx.notify_change();
+        }
+    }
+}
 
 pub fn create_window(app: Arc<Mutex<App>>) -> windows::core::Result<HWND> {
     let class_name_wide: Vec<u16> = CLASS_NAME.encode_utf16().chain(std::iter::once(0)).collect();
@@ -133,6 +155,8 @@ unsafe extern "system" fn wnd_proc(
             unsafe {
                 let _ = InvalidateRect(Some(hwnd), None, false);
             }
+            // TSF シンクにテキスト/カーソル変更を通知
+            notify_tsf_change(hwnd);
             LRESULT(0)
         }
         WM_DESTROY => {

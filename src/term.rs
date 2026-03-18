@@ -1,6 +1,7 @@
 use alacritty_terminal::event::EventListener;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line};
+use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::Config;
 use alacritty_terminal::term::Term;
 use alacritty_terminal::vte::ansi::Processor;
@@ -52,38 +53,111 @@ impl TermWrapper {
         self.parser.advance(&mut self.term, bytes);
     }
 
-    /// 指定行範囲のテキストを抽出（start_line..end_line, 0-indexed from screen top）
-    pub fn grid_text(&self, start_line: usize, end_line: usize) -> String {
+    /// 全画面テキスト取得（wide char spacer をスキップ、行末トリムなし）
+    /// 各行は固定長ではなく、spacer スキップ後の実文字 + '\n' で構成
+    pub fn screen_text(&self) -> String {
         let grid = self.term.grid();
         let cols = grid.columns();
+        let lines = grid.screen_lines();
         let mut text = String::new();
 
-        for line_idx in start_line..end_line {
+        for line_idx in 0..lines {
             let row = &grid[Line(line_idx as i32)];
-            let mut line_text = String::with_capacity(cols);
             for col in 0..cols {
                 let cell = &row[Column(col)];
-                line_text.push(cell.c);
+                // wide char spacer (全角文字の2セル目) はスキップ
+                if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                    continue;
+                }
+                text.push(cell.c);
             }
-            // 末尾の空白をトリム
-            let trimmed = line_text.trim_end();
-            text.push_str(trimmed);
-            if line_idx + 1 < end_line {
+            if line_idx + 1 < lines {
                 text.push('\n');
             }
         }
         text
     }
 
-    /// 全画面テキスト取得
-    pub fn screen_text(&self) -> String {
-        self.grid_text(0, self.screen_lines())
+    /// グリッド座標 (row, col) を ACP (screen_text 内のオフセット) に変換
+    pub fn grid_to_acp(&self, target_row: usize, target_col: usize) -> usize {
+        let grid = self.term.grid();
+        let cols = grid.columns();
+        let mut acp = 0usize;
+
+        for line_idx in 0..target_row {
+            let row = &grid[Line(line_idx as i32)];
+            for col in 0..cols {
+                let cell = &row[Column(col)];
+                if !cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                    acp += 1;
+                }
+            }
+            acp += 1; // '\n'
+        }
+
+        // target_row の中で target_col まで
+        let row = &grid[Line(target_row as i32)];
+        for col in 0..target_col {
+            let cell = &row[Column(col)];
+            if !cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                acp += 1;
+            }
+        }
+
+        acp
     }
 
     /// カーソル位置 (row, col) 0-indexed
     pub fn cursor_pos(&self) -> (usize, usize) {
         let point = self.term.grid().cursor.point;
         (point.line.0 as usize, point.column.0)
+    }
+
+    /// カーソル位置の ACP
+    /// wide char spacer セルの場合は本体セルにスナップ
+    pub fn cursor_acp(&self) -> usize {
+        let grid = self.term.grid();
+        let (row, mut col) = self.cursor_pos();
+
+        // wide char spacer 上にいる場合、本体セルにスナップ
+        if col > 0 {
+            let cell = &grid[Line(row as i32)][Column(col)];
+            if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                col -= 1;
+            }
+        }
+
+        self.grid_to_acp(row, col)
+    }
+
+    /// ACP をグリッド座標 (row, col) に逆変換
+    pub fn acp_to_grid(&self, target_acp: usize) -> (usize, usize) {
+        let grid = self.term.grid();
+        let cols = grid.columns();
+        let lines = grid.screen_lines();
+        let mut acp = 0usize;
+
+        for line_idx in 0..lines {
+            let row = &grid[Line(line_idx as i32)];
+            for col in 0..cols {
+                if acp == target_acp {
+                    return (line_idx, col);
+                }
+                let cell = &row[Column(col)];
+                if !cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                    acp += 1;
+                }
+            }
+            // '\n' のカウント
+            if acp == target_acp {
+                return (line_idx, cols);
+            }
+            acp += 1; // '\n'
+        }
+
+        // 末尾を超えた場合
+        let last_line = if lines > 0 { lines - 1 } else { 0 };
+        (last_line, cols)
     }
 
     /// リサイズ
