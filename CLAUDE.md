@@ -26,11 +26,13 @@ ITextStoreACP     Direct2D/DirectWrite
 
 | モジュール | 責務 |
 |---|---|
-| pty | ConPTY で wsl.exe を起動、読み書き |
-| term | `alacritty_terminal` のラッパー。グリッドバッファの管理 |
-| tsf | `ITextStoreACP` 実装。グリッドバッファの内容を IME に公開 |
-| render | Direct2D + DirectWrite でターミナル描画 |
-| window | Win32 ウィンドウ作成・メッセージループ |
+| app | アプリケーション状態（タブ一覧、Renderer、アクティブタブ管理） |
+| tab | 個別タブ（PTY + TermWrapper のペア） |
+| pty | ConPTY で wsl.exe/cmd.exe/powershell を起動、読み書き |
+| term | `alacritty_terminal` のラッパー。グリッドバッファ・ACP 変換 |
+| tsf | `ITextStoreACP` + `ITfContextOwnerCompositionSink` 実装。IME にバッファ公開 + composition 管理 |
+| render | Direct2D + DirectWrite でターミナル描画（preedit インライン描画含む） |
+| window | Win32 ウィンドウ作成・メッセージループ・IMM32 候補位置制御 |
 
 ## ビルド・実行
 
@@ -39,7 +41,13 @@ cargo build --release
 cargo run --release
 ```
 
+- **GUI アプリ (`#![windows_subsystem = "windows"]`)** のため `eprintln!` の出力は見えない
+- ビルド時に `target/release/taaminalu.exe` がロックされている場合はアプリを閉じてから再ビルド
+
 ## 開発ルール
+
+### 応答言語
+- **日本語で応答する**
 
 ### コミット
 - コミットメッセージは日本語で書く
@@ -64,7 +72,8 @@ cargo run --release
 | ConPTY | `windows` crate (`CreatePseudoConsole`, `ReadFile`, `WriteFile`) |
 | VT パース + バッファ | `alacritty_terminal` (0.25+) |
 | レンダリング | `windows` crate (Direct2D 1.1, DirectWrite) |
-| TSF テキストストア | `windows` crate (`ITextStoreACP`, `#[implement]` マクロ) |
+| TSF テキストストア | `windows` crate (`ITextStoreACP`, `ITfContextOwnerCompositionSink`, `#[implement]` マクロ) |
+| IME 候補位置制御 | `windows` crate (`ImmSetCandidateWindow`, `ImmSetCompositionWindow`) — TSF の `GetTextExt` だけでは不十分 |
 | ウィンドウ | `windows` crate (Win32 `CreateWindowExW`, メッセージループ) |
 
 ## ITextStoreACP 実装の要点
@@ -80,8 +89,23 @@ cargo run --release
 | `GetEndACP` | テキスト末尾位置を返す | バッファ全体の文字数 |
 | `RequestLock` | ロック管理 | 正しく実装しないと TSF マネージャーがクラッシュ |
 | `AdviseSink` | TSF マネージャーのシンク登録 | シンクを保持して変更通知に使う |
-| `SetText` | IME がテキストを挿入 | ConPTY への入力として転送 |
+| `SetText` | IME がテキストを挿入 | composition 中は preedit バッファに格納、確定時に PTY 転送 |
 | `GetStatus` | ドキュメント属性を返す | `TS_SD_READONLY` は返さない（入力可能） |
+
+### IME Composition の実装
+
+TSF の `ITextStoreACP` だけでは IME の composition（変換中テキスト）を正しく扱えない。
+以下の追加実装が必要:
+
+| 要素 | 実装 |
+|---|---|
+| Composition 状態管理 | `ITfContextOwnerCompositionSink` を `ITfSource::AdviseSink` で登録 |
+| `OnStartComposition` | composing フラグ ON |
+| `OnEndComposition` | composing フラグ OFF、preedit を PTY に送信 |
+| preedit バッファ | composition 中は `InsertTextAtSelection`/`SetText` で preedit に格納（PTY 送信しない） |
+| 仮想ドキュメント | `GetText`/`GetEndACP` は preedit を含む仮想テキストを返す |
+| インライン描画 | preedit テキストをカーソル位置に下線付きで描画 |
+| 候補ウィンドウ位置 | **TSF `GetTextExt` + IMM32 `ImmSetCandidateWindow` の併用**が必要（TSF だけでは MS IME の候補位置が反映されない） |
 
 ## ConPTY の基本フロー
 
@@ -102,9 +126,17 @@ cargo run --release
 ### windows crate 0.62
 - COM メソッドの引数型は `Ref<'_, T>`（`Option<&T>` ではない）
 
+### WM_CHAR と IME
+- `TranslateMessage` は `VK_BACK` を `WM_CHAR(0x08)` に変換する（`0x7F` ではない）。`WM_KEYDOWN` で処理済みのキーは `0x08` と `0x7F` の両方を `WM_CHAR` でフィルタすること
+- IME composition 中は `WM_CHAR` と `WM_KEYDOWN` を抑制し、`DefWindowProc` に委譲する（TSF 経由で処理されるため）
+- `WM_IME_STARTCOMPOSITION` / `WM_IME_COMPOSITION` で `ImmSetCandidateWindow` を呼び出して候補位置を設定する
+
 ### ConPTY
 - ReadFile/WriteFile は OVERLAPPED 非対応（同期 I/O のみ）
 - 読み取りと書き込みは別スレッドで処理（デッドロック防止）
+
+### レンダリング
+- 全角文字は `Flags::WIDE_CHAR` フラグを持ち、次のセルは `WIDE_CHAR_SPACER`。描画時は spacer をスキップし、本体セルで 2 セル幅を描画する
 
 ## 類似プロジェクト（参考）
 
@@ -113,4 +145,5 @@ cargo run --release
 | [Alacritty](https://github.com/alacritty/alacritty) | ConPTY 接続、alacritty_terminal の使い方、ターミナルバッファ設計 |
 | [WezTerm](https://github.com/wezterm/wezterm) | ターミナルバッファ、Windows 描画 |
 | [Windows Terminal](https://github.com/microsoft/terminal) | ConPTY、TSF/IME 統合、Direct3D+DirectWrite 描画 |
-| [Chromium TSF](https://chromium.googlesource.com/chromium/src/+/lkgr/ui/base/ime/win/tsf_text_store.h) | `ITextStoreACP` 実装のリファレンス |
+| [Chromium TSF](https://chromium.googlesource.com/chromium/src/+/lkgr/ui/base/ime/win/tsf_text_store.cc) | `ITextStoreACP` 実装のリファレンス |
+| [Firefox TSFTextStore](https://searchfox.org/mozilla-central/source/widget/windows/TSFTextStore.cpp) | `ITextStoreACP` + composition 処理。レガシー IME 回避策が豊富 |

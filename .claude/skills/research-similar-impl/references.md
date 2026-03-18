@@ -6,6 +6,7 @@
 | WezTerm | Rust | ターミナルバッファ設計、Windows 描画 | /tmp/wezterm | https://github.com/wezterm/wezterm |
 | Windows Terminal | C++ | ConPTY 設計元、TSF/IME 統合、DirectWrite 描画 | /tmp/terminal | https://github.com/microsoft/terminal |
 | Chromium | C++ | ITextStoreACP 実装のリファレンス | (Web参照) | https://chromium.googlesource.com/chromium/src/+/lkgr/ui/base/ime/win/tsf_text_store.cc |
+| Firefox | C++ | ITextStoreACP + composition。レガシー IME 回避策が豊富 | (Web参照) | https://searchfox.org/mozilla-central/source/widget/windows/TSFTextStore.cpp |
 
 全プロジェクトを調査する必要はない。機能に最も関連するものを優先する。
 
@@ -15,6 +16,8 @@
 |---|---|
 | TSF (Text Services Framework) | https://learn.microsoft.com/en-us/windows/win32/tsf/text-services-framework |
 | ITextStoreACP | https://learn.microsoft.com/en-us/windows/win32/api/textstor/nn-textstor-itextstoreacp |
+| ITfContextOwnerCompositionSink | https://learn.microsoft.com/en-us/windows/win32/api/msctf/nn-msctf-itfcontextownercompositionsink |
+| IMM32 (Input Method Manager) | https://learn.microsoft.com/en-us/windows/win32/intl/input-method-manager |
 | ConPTY (Creating a Pseudoconsole) | https://learn.microsoft.com/en-us/windows/console/creating-a-pseudoconsole-session |
 | Direct2D | https://learn.microsoft.com/en-us/windows/win32/direct2d/direct2d-portal |
 | DirectWrite | https://learn.microsoft.com/en-us/windows/win32/directwrite/direct-write-portal |
@@ -36,3 +39,5 @@
 | ウィンドウ管理 | `CreateWindowExW`, `DefWindowProcW`, `GetMessageW` |
 | リサイズ | `ResizePseudoConsole`, `WM_SIZE` |
 | キーボード入力 | `WM_KEYDOWN`, `WM_CHAR` → ConPTY WriteFile |
+| IME composition | `ITfContextOwnerCompositionSink`, `ITextStoreACP::InsertTextAtSelection/SetText` |
+| IME 候補位置 | `ImmSetCandidateWindow`, `ImmSetCompositionWindow`, `ITextStoreACP::GetTextExt` |
