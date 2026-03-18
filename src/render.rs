@@ -16,6 +16,7 @@ use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, PAINTSTRUCT};
 
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line};
+use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::vte::ansi::{Color, NamedColor};
 
 use crate::tab::TabId;
@@ -394,13 +395,21 @@ impl Renderer {
                     let c = cell.c;
                     let is_cursor = line_idx == cursor_row && col_idx == cursor_col;
 
+                    // wide char spacer はスキップ（本体セルで描画済み）
+                    if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                        continue;
+                    }
+
+                    let is_wide = cell.flags.contains(Flags::WIDE_CHAR);
+                    let cell_w = if is_wide { self.cell_width * 2.0 } else { self.cell_width };
+
                     // セル背景色
                     let cell_bg = color_to_d2d(&cell.bg);
                     let has_bg = cell_bg.r != BG_COLOR.r || cell_bg.g != BG_COLOR.g || cell_bg.b != BG_COLOR.b;
 
                     if has_bg || is_cursor {
                         let bg = if is_cursor { &CURSOR_COLOR } else { &cell_bg };
-                        self.fill_rect(x, y, x + self.cell_width, y + self.cell_height, bg);
+                        self.fill_rect(x, y, x + cell_w, y + self.cell_height, bg);
                     }
 
                     // テキスト
@@ -408,7 +417,7 @@ impl Renderer {
                         let fg = if is_cursor { BG_COLOR } else { color_to_d2d(&cell.fg) };
                         let text: Vec<u16> = [c as u16].to_vec();
                         if let Ok(layout) = self.dwrite_factory.CreateTextLayout(
-                            &text, &self.text_format, self.cell_width, self.cell_height,
+                            &text, &self.text_format, cell_w, self.cell_height,
                         ) {
                             if let Ok(brush) = self.rt.CreateSolidColorBrush(&fg, None) {
                                 self.rt.DrawTextLayout(
