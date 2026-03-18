@@ -181,8 +181,19 @@ impl ITextStoreACP_Impl for TextStore_Impl {
     ) -> Result<TS_TEXTCHANGE> {
         let slice = unsafe { std::slice::from_raw_parts(pchtext.0, cch as usize) };
         let text = String::from_utf16_lossy(slice);
+        eprintln!("[tsf] SetText: flags=0x{:x} range=[{}..{}] text={:?}", _dwflags, _acpstart, _acpend, text);
+
         let app = self.app.lock().unwrap();
-        let _ = app.write_pty(text.as_bytes());
+        if _acpstart == _acpend {
+            // 挿入 → そのまま PTY に送る
+            let _ = app.write_pty(text.as_bytes());
+        } else {
+            // 置換（IME composition 確定）→ 旧テキストをバックスペースで削除 + 新テキスト送信
+            let del_count = (_acpend - _acpstart) as usize;
+            let backspaces = vec![0x08u8; del_count];
+            let _ = app.write_pty(&backspaces);
+            let _ = app.write_pty(text.as_bytes());
+        }
 
         Ok(TS_TEXTCHANGE {
             acpStart: _acpstart,
@@ -251,6 +262,8 @@ impl ITextStoreACP_Impl for TextStore_Impl {
 
         let slice = unsafe { std::slice::from_raw_parts(pchtext.0, cch as usize) };
         let text = String::from_utf16_lossy(slice);
+        eprintln!("[tsf] InsertTextAtSelection: flags=0x{:x} text={:?}", dwflags, text);
+
         let app = self.app.lock().unwrap();
         let _ = app.write_pty(text.as_bytes());
 
