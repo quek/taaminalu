@@ -331,16 +331,37 @@ impl ITextStoreACP_Impl for TextStore_Impl {
         let app = self.app.lock().unwrap();
         let (cell_w, cell_h) = app.cell_size();
         let (start_row, start_col) = app.acp_to_grid(acpstart as usize);
-        let (end_row, end_col) = app.acp_to_grid(acpend as usize);
-        let mut rect = RECT {
-            left: (start_col as f32 * cell_w) as i32,
-            top: (start_row as f32 * cell_h) as i32,
-            right: (end_col as f32 * cell_w) as i32,
-            bottom: ((end_row + 1) as f32 * cell_h) as i32,
+
+        let mut rect = if acpstart == acpend {
+            // zero-width: カーソル位置（IME 候補ウィンドウの位置決め用）
+            let x = (start_col as f32 * cell_w) as i32;
+            let y = (start_row as f32 * cell_h) as i32;
+            RECT {
+                left: x,
+                top: y,
+                right: x,
+                bottom: y + cell_h as i32,
+            }
+        } else {
+            let (end_row, end_col) = app.acp_to_grid(acpend as usize);
+            RECT {
+                left: (start_col as f32 * cell_w) as i32,
+                top: (start_row as f32 * cell_h) as i32,
+                right: (end_col as f32 * cell_w) as i32,
+                bottom: ((end_row + 1) as f32 * cell_h) as i32,
+            }
         };
+
+        // クライアント座標 → スクリーン座標
+        let mut top_left = POINT { x: rect.left, y: rect.top };
+        let mut bottom_right = POINT { x: rect.right, y: rect.bottom };
         unsafe {
-            let _ = ClientToScreen(self.hwnd, &mut rect as *mut RECT as *mut POINT);
-            let _ = ClientToScreen(self.hwnd, &mut *(&mut rect.right as *mut i32 as *mut POINT));
+            let _ = ClientToScreen(self.hwnd, &mut top_left);
+            let _ = ClientToScreen(self.hwnd, &mut bottom_right);
+            rect.left = top_left.x;
+            rect.top = top_left.y;
+            rect.right = bottom_right.x;
+            rect.bottom = bottom_right.y;
             *prc = rect;
             *pfclipped = FALSE;
         }
@@ -351,8 +372,14 @@ impl ITextStoreACP_Impl for TextStore_Impl {
         let mut rect = RECT::default();
         unsafe {
             let _ = GetClientRect(self.hwnd, &mut rect);
-            let _ = ClientToScreen(self.hwnd, &mut rect as *mut RECT as *mut POINT);
-            let _ = ClientToScreen(self.hwnd, &mut *(&mut rect.right as *mut i32 as *mut POINT));
+            let mut top_left = POINT { x: rect.left, y: rect.top };
+            let mut bottom_right = POINT { x: rect.right, y: rect.bottom };
+            let _ = ClientToScreen(self.hwnd, &mut top_left);
+            let _ = ClientToScreen(self.hwnd, &mut bottom_right);
+            rect.left = top_left.x;
+            rect.top = top_left.y;
+            rect.right = bottom_right.x;
+            rect.bottom = bottom_right.y;
         }
         Ok(rect)
     }

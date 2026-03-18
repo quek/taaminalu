@@ -114,7 +114,8 @@ impl TermWrapper {
     }
 
     /// カーソル位置の ACP
-    /// wide char spacer セルの場合は本体セルにスナップ
+    /// ACP は文字間の位置（カーソルが N 番目の文字の前にいる = ACP N）
+    /// wide char spacer セルの場合のみ本体セルにスナップ
     pub fn cursor_acp(&self) -> usize {
         let grid = self.term.grid();
         let (row, mut col) = self.cursor_pos();
