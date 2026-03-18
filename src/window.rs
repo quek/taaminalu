@@ -15,6 +15,10 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Memory::{GlobalLock, GlobalUnlock};
 use windows::Win32::System::Ole::CF_UNICODETEXT;
 use windows::Win32::System::Threading::{WaitForSingleObject, INFINITE};
+use windows::Win32::UI::Input::Ime::{
+    CFS_POINT, CANDIDATEFORM, COMPOSITIONFORM,
+    ImmGetContext, ImmReleaseContext, ImmSetCandidateWindow, ImmSetCompositionWindow,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -94,6 +98,64 @@ fn notify_tsf_change(hwnd: HWND) {
         let map = map.lock().unwrap();
         if let Some(ctx) = map.get(&(hwnd.0 as isize)) {
             ctx.notify_change();
+        }
+    }
+}
+
+fn is_composing(hwnd: HWND) -> bool {
+    if let Some(map) = TSF_CONTEXTS.get() {
+        let map = map.lock().unwrap();
+        if let Some(ctx) = map.get(&(hwnd.0 as isize)) {
+            return ctx.is_composing();
+        }
+    }
+    false
+}
+
+fn get_preedit(hwnd: HWND) -> String {
+    if let Some(map) = TSF_CONTEXTS.get() {
+        let map = map.lock().unwrap();
+        if let Some(ctx) = map.get(&(hwnd.0 as isize)) {
+            return ctx.preedit();
+        }
+    }
+    String::new()
+}
+
+/// IMM32 API で候補ウィンドウ・変換ウィンドウの位置をカーソル位置に設定
+fn update_ime_position(hwnd: HWND) {
+    let app = get_app(hwnd);
+    let Some(app) = app else { return };
+    let app = app.lock().unwrap();
+    let (cell_w, cell_h) = app.cell_size();
+    let (_, grid_y) = app.grid_origin();
+    let (cursor_row, cursor_col) = app.active().term.cursor_pos();
+    let x = (cursor_col as f32 * cell_w) as i32;
+    let y = (cursor_row as f32 * cell_h) as i32 + grid_y as i32;
+    drop(app);
+
+    let pt = POINT { x, y };
+    unsafe {
+        let himc = ImmGetContext(hwnd);
+        if !himc.0.is_null() {
+            let _ = ImmSetCompositionWindow(
+                himc,
+                &COMPOSITIONFORM {
+                    dwStyle: CFS_POINT,
+                    ptCurrentPos: pt,
+                    ..Default::default()
+                },
+            );
+            let _ = ImmSetCandidateWindow(
+                himc,
+                &CANDIDATEFORM {
+                    dwIndex: 0,
+                    dwStyle: CFS_POINT,
+                    ptCurrentPos: POINT { x: pt.x, y: pt.y + cell_h as i32 },
+                    ..Default::default()
+                },
+            );
+            let _ = ImmReleaseContext(hwnd, himc);
         }
     }
 }
@@ -253,11 +315,20 @@ unsafe extern "system" fn wnd_proc(
             }
             LRESULT(0)
         }
+        WM_IME_STARTCOMPOSITION => {
+            update_ime_position(hwnd);
+            return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
+        }
+        WM_IME_COMPOSITION => {
+            update_ime_position(hwnd);
+            return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
+        }
         WM_PAINT => {
+            let preedit = get_preedit(hwnd);
             let app = get_app(hwnd);
             if let Some(app) = app {
                 let app = app.lock().unwrap();
-                app.paint(hwnd);
+                app.paint(hwnd, &preedit);
             }
             LRESULT(0)
         }
@@ -274,10 +345,14 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_CHAR | WM_SYSCHAR => {
+            // IME composition 中は WM_CHAR を無視（TSF 経由で処理される）
+            if is_composing(hwnd) {
+                return LRESULT(0);
+            }
             let ch = wparam.0 as u32;
             if let Some(c) = char::from_u32(ch) {
-                // VK_BACK は WM_KEYDOWN で 0x7F として送信済み
-                if c == '\x7f' {
+                // VK_BACK は WM_KEYDOWN で処理済み（0x08=BS, 0x7F=DEL 両方をスキップ）
+                if c == '\x08' || c == '\x7f' {
                     return LRESULT(0);
                 }
                 let app = get_app(hwnd);
@@ -303,6 +378,11 @@ unsafe extern "system" fn wnd_proc(
         WM_KEYDOWN | WM_SYSKEYDOWN => {
             let vk = VIRTUAL_KEY(wparam.0 as u16);
             let mods = get_modifiers();
+
+            // IME composition 中はキー入力を IME に委ねる（タブ操作以外）
+            if is_composing(hwnd) && !mods.ctrl {
+                return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
+            }
 
             // タブ操作ショートカット
             if mods.ctrl && mods.shift {

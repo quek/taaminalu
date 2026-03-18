@@ -49,12 +49,12 @@ impl App {
         &self.tabs[self.active_tab]
     }
 
-    pub fn paint(&self, hwnd: HWND) {
+    pub fn paint(&self, hwnd: HWND, preedit: &str) {
         if let Some(ref renderer) = self.renderer {
             let tab_infos: Vec<(&str, TabId)> = self.tabs.iter()
                 .map(|t| (t.title.as_str(), t.id))
                 .collect();
-            renderer.paint_with_tabs(hwnd, &self.active().term, &tab_infos, self.active_tab);
+            renderer.paint_with_tabs(hwnd, &self.active().term, &tab_infos, self.active_tab, preedit);
         }
     }
 

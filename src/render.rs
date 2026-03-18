@@ -289,6 +289,7 @@ impl Renderer {
         term: &TermWrapper,
         tabs: &[(&str, TabId)],
         active_index: usize,
+        preedit: &str,
     ) {
         let mut ps = PAINTSTRUCT::default();
         unsafe { let _ = BeginPaint(hwnd, &mut ps); }
@@ -298,10 +299,51 @@ impl Renderer {
             self.rt.Clear(Some(&BG_COLOR));
             self.draw_tab_bar(tabs, active_index);
             self.draw_grid(term);
+            if !preedit.is_empty() {
+                let (cursor_row, cursor_col) = term.cursor_pos();
+                self.draw_preedit(preedit, cursor_row, cursor_col);
+            }
             let _ = self.rt.EndDraw(None, None);
         }
 
         unsafe { let _ = EndPaint(hwnd, &ps); }
+    }
+
+    /// IME preedit（変換中テキスト）をカーソル位置にインライン描画
+    fn draw_preedit(&self, preedit: &str, cursor_row: usize, cursor_col: usize) {
+        let x = cursor_col as f32 * self.cell_width;
+        let y = TAB_BAR_HEIGHT + cursor_row as f32 * self.cell_height;
+
+        // preedit の表示幅を計算（全角文字は2セル）
+        let display_width: usize = preedit.chars().map(|c| {
+            if c.is_ascii() { 1 } else { 2 }
+        }).sum();
+        let preedit_pixel_width = display_width as f32 * self.cell_width;
+
+        unsafe {
+            // 背景
+            let bg = D2D1_COLOR_F { r: 0.2, g: 0.2, b: 0.3, a: 1.0 };
+            self.fill_rect(x, y, x + preedit_pixel_width, y + self.cell_height, &bg);
+
+            // テキスト
+            let fg = D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
+            let wide: Vec<u16> = preedit.encode_utf16().collect();
+            if let Ok(layout) = self.dwrite_factory.CreateTextLayout(
+                &wide, &self.text_format, preedit_pixel_width, self.cell_height,
+            ) {
+                if let Ok(brush) = self.rt.CreateSolidColorBrush(&fg, None) {
+                    self.rt.DrawTextLayout(
+                        windows_numerics::Vector2 { X: x, Y: y },
+                        &layout, &brush, D2D1_DRAW_TEXT_OPTIONS_NONE,
+                    );
+                }
+            }
+
+            // 下線
+            let underline_y = y + self.cell_height - 1.0;
+            let underline_color = D2D1_COLOR_F { r: 0.8, g: 0.8, b: 0.2, a: 1.0 };
+            self.fill_rect(x, underline_y, x + preedit_pixel_width, underline_y + 1.0, &underline_color);
+        }
     }
 
     fn draw_tab_bar(&self, tabs: &[(&str, TabId)], active_index: usize) {

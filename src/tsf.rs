@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use windows::core::*;
 use windows::Win32::Foundation::*;
-use windows::Win32::Graphics::Gdi::{ClientToScreen, ScreenToClient};
+use windows::Win32::Graphics::Gdi::{ClientToScreen, InvalidateRect, ScreenToClient};
 use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
 use windows::Win32::UI::TextServices::*;
 
@@ -14,35 +14,132 @@ pub struct SharedSink {
     pub mask: u32,
 }
 
-/// TSF ITextStoreACP 実装
-#[implement(ITextStoreACP)]
+/// 共有 composition 状態（TextStore, TsfContext, window から参照）
+pub struct CompositionState {
+    pub composing: bool,
+    pub preedit: String,
+}
+
+impl CompositionState {
+    fn new() -> Self {
+        Self { composing: false, preedit: String::new() }
+    }
+}
+
+/// TSF ITextStoreACP + ITfContextOwnerCompositionSink 実装
+#[implement(ITextStoreACP, ITfContextOwnerCompositionSink)]
 pub struct TextStore {
     app: Arc<Mutex<App>>,
     hwnd: HWND,
     shared_sink: Arc<Mutex<SharedSink>>,
     lock_flags: Mutex<u32>,
+    composition: Arc<Mutex<CompositionState>>,
 }
 
 impl TextStore {
-    pub fn new(app: Arc<Mutex<App>>, hwnd: HWND, shared_sink: Arc<Mutex<SharedSink>>) -> Self {
+    pub fn new(
+        app: Arc<Mutex<App>>,
+        hwnd: HWND,
+        shared_sink: Arc<Mutex<SharedSink>>,
+        composition: Arc<Mutex<CompositionState>>,
+    ) -> Self {
         Self {
             app,
             hwnd,
             shared_sink,
             lock_flags: Mutex::new(0),
+            composition,
         }
     }
 
+    /// ターミナルバッファのテキスト（composition 中は preedit を含む仮想ドキュメント）
     fn get_text_content(&self) -> String {
+        let preedit = self.composition.lock().unwrap().preedit.clone();
         let app = self.app.lock().unwrap();
-        app.screen_text()
+        let base = app.screen_text();
+        if preedit.is_empty() {
+            return base;
+        }
+        // カーソル位置に preedit を挿入した仮想ドキュメントを返す
+        let cursor_acp = app.cursor_acp();
+        let utf16: Vec<u16> = base.encode_utf16().collect();
+        let pos = cursor_acp.min(utf16.len());
+        let before = String::from_utf16_lossy(&utf16[..pos]);
+        let after = String::from_utf16_lossy(&utf16[pos..]);
+        format!("{}{}{}", before, preedit, after)
     }
 
+    /// カーソル ACP（composition 中は preedit 末尾を返す）
     fn cursor_to_acp(&self) -> i32 {
+        let preedit_len = self.composition.lock().unwrap().preedit.encode_utf16().count() as i32;
         let app = self.app.lock().unwrap();
-        app.cursor_acp() as i32
+        app.cursor_acp() as i32 + preedit_len
+    }
+
+    /// ターミナルバッファ上のカーソル ACP（preedit を含まない）
+    fn base_cursor_acp(&self) -> i32 {
+        self.app.lock().unwrap().cursor_acp() as i32
+    }
+
+    fn invalidate(&self) {
+        unsafe { let _ = InvalidateRect(Some(self.hwnd), None, false); }
+    }
+
+    /// preedit 文字列内の UTF-16 オフセットを表示カラム数に変換
+    fn preedit_utf16_offset_to_cols(&self, utf16_offset: i32) -> usize {
+        let preedit = self.composition.lock().unwrap().preedit.clone();
+        let mut utf16_count = 0i32;
+        let mut cols = 0usize;
+        for c in preedit.chars() {
+            if utf16_count >= utf16_offset {
+                break;
+            }
+            utf16_count += c.len_utf16() as i32;
+            cols += if c.is_ascii() { 1 } else { 2 };
+        }
+        cols
     }
 }
+
+// --- ITfContextOwnerCompositionSink ---
+
+impl ITfContextOwnerCompositionSink_Impl for TextStore_Impl {
+    fn OnStartComposition(
+        &self,
+        _pcomposition: Ref<ITfCompositionView>,
+    ) -> Result<BOOL> {
+        self.composition.lock().unwrap().composing = true;
+        Ok(TRUE)
+    }
+
+    fn OnUpdateComposition(
+        &self,
+        _pcomposition: Ref<ITfCompositionView>,
+        _prangenew: Ref<ITfRange>,
+    ) -> Result<()> {
+        self.invalidate();
+        Ok(())
+    }
+
+    fn OnEndComposition(
+        &self,
+        _pcomposition: Ref<ITfCompositionView>,
+    ) -> Result<()> {
+        let preedit = {
+            let mut comp = self.composition.lock().unwrap();
+            comp.composing = false;
+            std::mem::take(&mut comp.preedit)
+        };
+        if !preedit.is_empty() {
+            let app = self.app.lock().unwrap();
+            let _ = app.write_pty(preedit.as_bytes());
+        }
+        self.invalidate();
+        Ok(())
+    }
+}
+
+// --- ITextStoreACP ---
 
 impl ITextStoreACP_Impl for TextStore_Impl {
     fn AdviseSink(
@@ -181,17 +278,15 @@ impl ITextStoreACP_Impl for TextStore_Impl {
     ) -> Result<TS_TEXTCHANGE> {
         let slice = unsafe { std::slice::from_raw_parts(pchtext.0, cch as usize) };
         let text = String::from_utf16_lossy(slice);
-        eprintln!("[tsf] SetText: flags=0x{:x} range=[{}..{}] text={:?}", _dwflags, _acpstart, _acpend, text);
 
-        let app = self.app.lock().unwrap();
-        if _acpstart == _acpend {
-            // 挿入 → そのまま PTY に送る
-            let _ = app.write_pty(text.as_bytes());
+        let composing = self.composition.lock().unwrap().composing;
+        if composing {
+            // Composition 中: preedit を更新するだけ（PTY には送信しない）
+            self.composition.lock().unwrap().preedit = text;
+            self.invalidate();
         } else {
-            // 置換（IME composition 確定）→ 旧テキストをバックスペースで削除 + 新テキスト送信
-            let del_count = (_acpend - _acpstart) as usize;
-            let backspaces = vec![0x08u8; del_count];
-            let _ = app.write_pty(&backspaces);
+            // Composition 外: PTY に直接送信
+            let app = self.app.lock().unwrap();
             let _ = app.write_pty(text.as_bytes());
         }
 
@@ -246,38 +341,41 @@ impl ITextStoreACP_Impl for TextStore_Impl {
         pacpend: *mut i32,
         pchange: *mut TS_TEXTCHANGE,
     ) -> Result<()> {
-        let acp = self.cursor_to_acp();
+        let composing = self.composition.lock().unwrap().composing;
+        let base_acp = self.base_cursor_acp();
+        let preedit_len = self.composition.lock().unwrap().preedit.encode_utf16().count() as i32;
+        // composition 中は preedit 末尾が挿入点
+        let insert_acp = base_acp + preedit_len;
 
         if dwflags & TF_IAS_QUERYONLY.0 as u32 != 0 {
             unsafe {
-                if !pacpstart.is_null() {
-                    *pacpstart = acp;
-                }
-                if !pacpend.is_null() {
-                    *pacpend = acp;
-                }
+                if !pacpstart.is_null() { *pacpstart = insert_acp; }
+                if !pacpend.is_null() { *pacpend = insert_acp; }
             }
             return Ok(());
         }
 
         let slice = unsafe { std::slice::from_raw_parts(pchtext.0, cch as usize) };
         let text = String::from_utf16_lossy(slice);
-        eprintln!("[tsf] InsertTextAtSelection: flags=0x{:x} text={:?}", dwflags, text);
 
-        let app = self.app.lock().unwrap();
-        let _ = app.write_pty(text.as_bytes());
+        if composing {
+            // Composition 中: preedit に追加（PTY には送信しない）
+            self.composition.lock().unwrap().preedit.push_str(&text);
+            self.invalidate();
+        } else {
+            // Composition 外: PTY に直接送信
+            let app = self.app.lock().unwrap();
+            let _ = app.write_pty(text.as_bytes());
+        }
 
+        let new_end = insert_acp + cch as i32;
         unsafe {
-            if !pacpstart.is_null() {
-                *pacpstart = acp;
-            }
-            if !pacpend.is_null() {
-                *pacpend = acp + cch as i32;
-            }
+            if !pacpstart.is_null() { *pacpstart = insert_acp; }
+            if !pacpend.is_null() { *pacpend = new_end; }
             if !pchange.is_null() {
-                (*pchange).acpStart = acp;
-                (*pchange).acpOldEnd = acp;
-                (*pchange).acpNewEnd = acp + cch as i32;
+                (*pchange).acpStart = insert_acp;
+                (*pchange).acpOldEnd = insert_acp;
+                (*pchange).acpNewEnd = new_end;
             }
         }
         Ok(())
@@ -342,29 +440,34 @@ impl ITextStoreACP_Impl for TextStore_Impl {
     }
 
     fn GetTextExt(&self, _vcview: u32, acpstart: i32, acpend: i32, prc: *mut RECT, pfclipped: *mut BOOL) -> Result<()> {
+        let composing = self.composition.lock().unwrap().composing;
         let app = self.app.lock().unwrap();
         let (cell_w, cell_h) = app.cell_size();
         let (_, grid_y) = app.grid_origin();
         let grid_y_i = grid_y as i32;
-        let (start_row, start_col) = app.acp_to_grid(acpstart as usize);
 
-        let mut rect = if acpstart == acpend {
-            // zero-width: カーソル位置（IME 候補ウィンドウの位置決め用）
-            let x = (start_col as f32 * cell_w) as i32;
-            let y = (start_row as f32 * cell_h) as i32 + grid_y_i;
-            RECT {
-                left: x,
-                top: y,
-                right: x,
-                bottom: y + cell_h as i32,
-            }
+        let mut rect = if composing {
+            // Composition 中: カーソル位置を直接使う（ACP→グリッド変換の誤差を回避）
+            let (cursor_row, cursor_col) = app.active().term.cursor_pos();
+            let preedit_cols = self.preedit_utf16_offset_to_cols(acpend - acpstart);
+            let x = (cursor_col as f32 * cell_w) as i32;
+            let y = (cursor_row as f32 * cell_h) as i32 + grid_y_i;
+            let right = x + (preedit_cols as f32 * cell_w) as i32;
+            RECT { left: x, top: y, right: right.max(x), bottom: y + cell_h as i32 }
         } else {
-            let (end_row, end_col) = app.acp_to_grid(acpend as usize);
-            RECT {
-                left: (start_col as f32 * cell_w) as i32,
-                top: (start_row as f32 * cell_h) as i32 + grid_y_i,
-                right: (end_col as f32 * cell_w) as i32,
-                bottom: ((end_row + 1) as f32 * cell_h) as i32 + grid_y_i,
+            let (start_row, start_col) = app.acp_to_grid(acpstart as usize);
+            if acpstart == acpend {
+                let x = (start_col as f32 * cell_w) as i32;
+                let y = (start_row as f32 * cell_h) as i32 + grid_y_i;
+                RECT { left: x, top: y, right: x, bottom: y + cell_h as i32 }
+            } else {
+                let (end_row, end_col) = app.acp_to_grid(acpend as usize);
+                RECT {
+                    left: (start_col as f32 * cell_w) as i32,
+                    top: (start_row as f32 * cell_h) as i32 + grid_y_i,
+                    right: (end_col as f32 * cell_w) as i32,
+                    bottom: ((end_row + 1) as f32 * cell_h) as i32 + grid_y_i,
+                }
             }
         };
 
@@ -408,7 +511,9 @@ pub struct TsfContext {
     pub _thread_mgr: ITfThreadMgr,
     pub _doc_mgr: ITfDocumentMgr,
     pub shared_sink: Arc<Mutex<SharedSink>>,
+    pub composition: Arc<Mutex<CompositionState>>,
     app: Arc<Mutex<App>>,
+    _composition_sink_cookie: u32,
 }
 
 // COM オブジェクトはメインスレッド (STA) でのみ使用するため安全
@@ -416,8 +521,23 @@ unsafe impl Send for TsfContext {}
 unsafe impl Sync for TsfContext {}
 
 impl TsfContext {
+    /// Composition 中かどうか
+    pub fn is_composing(&self) -> bool {
+        self.composition.lock().unwrap().composing
+    }
+
+    /// 現在の preedit テキスト
+    pub fn preedit(&self) -> String {
+        self.composition.lock().unwrap().preedit.clone()
+    }
+
     /// PTY出力後にテキスト変更を TSF シンクに通知
     pub fn notify_change(&self) {
+        // composition 中は通知しない（preedit が消えてしまうため）
+        if self.is_composing() {
+            return;
+        }
+
         // ロックを先にドロップしてからコールバック（デッドロック防止）
         let (sink, mask) = {
             let shared = self.shared_sink.lock().unwrap();
@@ -461,14 +581,28 @@ pub fn setup_tsf(
     let doc_mgr = unsafe { thread_mgr.CreateDocumentMgr()? };
 
     let shared_sink = Arc::new(Mutex::new(SharedSink { sink: None, mask: 0 }));
-    let text_store = TextStore::new(Arc::clone(&app), hwnd, Arc::clone(&shared_sink));
+    let composition = Arc::new(Mutex::new(CompositionState::new()));
+    let text_store = TextStore::new(
+        Arc::clone(&app),
+        hwnd,
+        Arc::clone(&shared_sink),
+        Arc::clone(&composition),
+    );
     let text_store_unk: IUnknown = text_store.into();
 
     let mut context: Option<ITfContext> = None;
     let mut edit_cookie = 0u32;
+    let mut composition_sink_cookie = 0u32;
     unsafe {
         doc_mgr.CreateContext(client_id, 0, &text_store_unk, &mut context, &mut edit_cookie)?;
         if let Some(ref ctx) = context {
+            // ITfContextOwnerCompositionSink を登録して composition の開始/終了を検知
+            let source: ITfSource = ctx.cast()?;
+            composition_sink_cookie = source.AdviseSink(
+                &ITfContextOwnerCompositionSink::IID,
+                &text_store_unk,
+            )?;
+
             doc_mgr.Push(ctx)?;
         }
         thread_mgr.SetFocus(&doc_mgr)?;
@@ -478,6 +612,8 @@ pub fn setup_tsf(
         _thread_mgr: thread_mgr,
         _doc_mgr: doc_mgr,
         shared_sink,
+        composition,
         app,
+        _composition_sink_cookie: composition_sink_cookie,
     })
 }
