@@ -7,6 +7,8 @@ edition = "2024"
 alacritty_terminal = "0.25"
 vte = "0.15"
 log = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 windows-core = "0.62"
 windows-numerics = "0.3"
 

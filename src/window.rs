@@ -1,7 +1,10 @@
 use std::collections::HashMap;
+use std::fs;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use serde::{Deserialize, Serialize};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::InvalidateRect;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -13,6 +16,45 @@ const CLASS_NAME: &str = "TaaminaluWindow";
 const WINDOW_TITLE: &str = "taaminalu";
 const DEFAULT_WIDTH: i32 = 800;
 const DEFAULT_HEIGHT: i32 = 600;
+
+#[derive(Serialize, Deserialize)]
+struct WindowGeometry {
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+}
+
+fn config_path() -> PathBuf {
+    let appdata = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(appdata).join("taaminalu").join("window.json")
+}
+
+fn load_geometry() -> Option<WindowGeometry> {
+    let path = config_path();
+    let data = fs::read_to_string(path).ok()?;
+    serde_json::from_str(&data).ok()
+}
+
+fn save_geometry(hwnd: HWND) {
+    let mut rect = RECT::default();
+    if unsafe { GetWindowRect(hwnd, &mut rect) }.is_err() {
+        return;
+    }
+    let geo = WindowGeometry {
+        x: rect.left,
+        y: rect.top,
+        width: rect.right - rect.left,
+        height: rect.bottom - rect.top,
+    };
+    let path = config_path();
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Ok(json) = serde_json::to_string(&geo) {
+        let _ = fs::write(path, json);
+    }
+}
 
 /// カスタムメッセージ: PTY からデータ受信で再描画要求
 pub const WM_PTY_OUTPUT: u32 = WM_USER + 1;
@@ -59,15 +101,20 @@ pub fn create_window(app: Arc<Mutex<App>>) -> windows::core::Result<HWND> {
         // App を Box でヒープに確保して LPARAM で渡す
         let app_ptr = Box::into_raw(Box::new(app));
 
+        let (x, y, w, h) = match load_geometry() {
+            Some(geo) => (geo.x, geo.y, geo.width, geo.height),
+            None => (CW_USEDEFAULT, CW_USEDEFAULT, DEFAULT_WIDTH, DEFAULT_HEIGHT),
+        };
+
         let hwnd = CreateWindowExW(
             WINDOW_EX_STYLE::default(),
             windows::core::PCWSTR(class_name_wide.as_ptr()),
             windows::core::PCWSTR(title_wide.as_ptr()),
             WS_OVERLAPPEDWINDOW | WS_VISIBLE,
-            CW_USEDEFAULT,
-            CW_USEDEFAULT,
-            DEFAULT_WIDTH,
-            DEFAULT_HEIGHT,
+            x,
+            y,
+            w,
+            h,
             None,
             None,
             Some(hinstance.into()),
@@ -160,6 +207,8 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_DESTROY => {
+            // ウィンドウ位置・サイズを保存
+            save_geometry(hwnd);
             // App ポインタをクリーンアップ
             let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut Arc<Mutex<App>>;
             if !ptr.is_null() {
