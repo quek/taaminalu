@@ -2,10 +2,14 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
+use std::thread;
 
 use serde::{Deserialize, Serialize};
-use windows::Win32::Foundation::{HGLOBAL, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{
+    CloseHandle, HGLOBAL, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM, HANDLE,
+};
 use windows::Win32::Graphics::Gdi::InvalidateRect;
+use windows::Win32::Storage::FileSystem::ReadFile;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::DataExchange::GetClipboardData;
 use windows::Win32::System::DataExchange::{CloseClipboard, OpenClipboard};
@@ -16,6 +20,9 @@ use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::app::App;
+use crate::pty::ShellType;
+use crate::render::TabBarHitResult;
+use crate::tab::TabId;
 use crate::tsf::TsfContext;
 
 const CLASS_NAME: &str = "TaaminaluWindow";
@@ -62,8 +69,15 @@ fn save_geometry(hwnd: HWND) {
     }
 }
 
-/// カスタムメッセージ: PTY からデータ受信で再描画要求
+/// カスタムメッセージ: PTY からデータ受信で再描画要求 (WPARAM = TabId)
 pub const WM_PTY_OUTPUT: u32 = WM_USER + 1;
+/// カスタムメッセージ: タブの PTY プロセスが終了 (WPARAM = TabId)
+pub const WM_TAB_CLOSED: u32 = WM_USER + 2;
+
+// シェル選択メニュー ID
+const MENU_ID_WSL: u32 = 1;
+const MENU_ID_CMD: u32 = 2;
+const MENU_ID_POWERSHELL: u32 = 3;
 
 /// HWND ごとの TSF コンテキスト
 static TSF_CONTEXTS: OnceLock<Mutex<HashMap<isize, TsfContext>>> = OnceLock::new();
@@ -147,6 +161,57 @@ pub fn run_message_loop() {
     }
 }
 
+/// PTY 読み取りスレッドを起動
+pub(crate) fn start_pty_reader(
+    app: Arc<Mutex<App>>,
+    hwnd: HWND,
+    read_handle: HANDLE,
+    tab_id: TabId,
+) {
+    let hwnd_val = hwnd.0 as usize;
+    let handle_val = read_handle.0 as usize;
+
+    thread::spawn(move || {
+        let hwnd = HWND(hwnd_val as *mut _);
+        let read_handle = HANDLE(handle_val as *mut _);
+        let mut buf = [0u8; 4096];
+        loop {
+            let mut bytes_read = 0u32;
+            let ok = unsafe {
+                ReadFile(read_handle, Some(&mut buf), Some(&mut bytes_read), None)
+            };
+            match ok {
+                Ok(()) if bytes_read == 0 => break,
+                Ok(()) => {
+                    let n = bytes_read as usize;
+                    let mut app_lock = app.lock().unwrap();
+                    app_lock.process_pty_output_for_tab(tab_id, &buf[..n]);
+                    drop(app_lock);
+                    unsafe {
+                        let _ = PostMessageW(
+                            Some(hwnd),
+                            WM_PTY_OUTPUT,
+                            WPARAM(tab_id as usize),
+                            LPARAM(0),
+                        );
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        unsafe {
+            let _ = CloseHandle(read_handle);
+            // PTY が終了したことを通知
+            let _ = PostMessageW(
+                Some(hwnd),
+                WM_TAB_CLOSED,
+                WPARAM(tab_id as usize),
+                LPARAM(0),
+            );
+        }
+    });
+}
+
 unsafe extern "system" fn wnd_proc(
     hwnd: HWND,
     msg: u32,
@@ -213,6 +278,32 @@ unsafe extern "system" fn wnd_proc(
             let vk = VIRTUAL_KEY(wparam.0 as u16);
             let mods = get_modifiers();
 
+            // タブ操作ショートカット
+            if mods.ctrl && mods.shift {
+                match vk {
+                    VK_T => {
+                        show_new_tab_menu(hwnd);
+                        return LRESULT(0);
+                    }
+                    VK_W => {
+                        close_active_tab(hwnd);
+                        return LRESULT(0);
+                    }
+                    VK_TAB => {
+                        // Ctrl+Shift+Tab: 前のタブ
+                        switch_tab_relative(hwnd, -1);
+                        return LRESULT(0);
+                    }
+                    _ => {}
+                }
+            }
+
+            // Ctrl+Tab: 次のタブ
+            if mods.ctrl && !mods.shift && vk == VK_TAB {
+                switch_tab_relative(hwnd, 1);
+                return LRESULT(0);
+            }
+
             // Ctrl+Shift+V: ペースト
             if vk == VK_V && mods.ctrl && mods.shift {
                 paste_from_clipboard(hwnd);
@@ -236,11 +327,46 @@ unsafe extern "system" fn wnd_proc(
 
             LRESULT(0)
         }
+        WM_LBUTTONDOWN => {
+            let x = (lparam.0 & 0xFFFF) as i16 as f32;
+            let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as f32;
+            handle_tab_bar_click(hwnd, x, y);
+            LRESULT(0)
+        }
         WM_PTY_OUTPUT => {
-            unsafe {
-                let _ = InvalidateRect(Some(hwnd), None, false);
+            let tab_id = wparam.0 as TabId;
+            // アクティブタブの出力なら再描画 + TSF通知
+            let is_active = {
+                let app = get_app(hwnd);
+                app.map(|a| {
+                    let app = a.lock().unwrap();
+                    app.active_tab_id() == tab_id
+                }).unwrap_or(false)
+            };
+            if is_active {
+                unsafe {
+                    let _ = InvalidateRect(Some(hwnd), None, false);
+                }
+                notify_tsf_change(hwnd);
             }
-            notify_tsf_change(hwnd);
+            LRESULT(0)
+        }
+        WM_TAB_CLOSED => {
+            let tab_id = wparam.0 as TabId;
+            let app = get_app(hwnd);
+            if let Some(app) = app {
+                let mut app_lock = app.lock().unwrap();
+                if let Some(index) = app_lock.find_tab_index(tab_id) {
+                    let should_close = app_lock.close_tab(index);
+                    drop(app_lock);
+                    if should_close {
+                        unsafe { let _ = DestroyWindow(hwnd); }
+                    } else {
+                        unsafe { let _ = InvalidateRect(Some(hwnd), None, false); }
+                        notify_tsf_change(hwnd);
+                    }
+                }
+            }
             LRESULT(0)
         }
         WM_DESTROY => {
@@ -270,6 +396,167 @@ fn get_app(hwnd: HWND) -> Option<Arc<Mutex<App>>> {
     }
     let app = unsafe { &*ptr };
     Some(Arc::clone(app))
+}
+
+// --- タブ操作 ---
+
+fn handle_tab_bar_click(hwnd: HWND, x: f32, y: f32) {
+    let app = get_app(hwnd);
+    let app = match app {
+        Some(a) => a,
+        None => return,
+    };
+
+    let hit = {
+        let app_lock = app.lock().unwrap();
+        if let Some(ref renderer) = app_lock.renderer {
+            renderer.hit_test_tab_bar(x, y, app_lock.tab_count())
+        } else {
+            return;
+        }
+    };
+
+    match hit {
+        TabBarHitResult::Tab(index) => {
+            let mut app_lock = app.lock().unwrap();
+            app_lock.switch_tab(index);
+            drop(app_lock);
+            unsafe { let _ = InvalidateRect(Some(hwnd), None, false); }
+            notify_tsf_change(hwnd);
+        }
+        TabBarHitResult::CloseTab(index) => {
+            close_tab_at(hwnd, index);
+        }
+        TabBarHitResult::NewTab => {
+            show_new_tab_menu(hwnd);
+        }
+        TabBarHitResult::None => {}
+    }
+}
+
+fn show_new_tab_menu(hwnd: HWND) {
+    unsafe {
+        let menu = CreatePopupMenu();
+        let menu = match menu {
+            Ok(m) => m,
+            Err(_) => return,
+        };
+
+        let wsl_text: Vec<u16> = "WSL\0".encode_utf16().collect();
+        let cmd_text: Vec<u16> = "CMD\0".encode_utf16().collect();
+        let ps_text: Vec<u16> = "PowerShell\0".encode_utf16().collect();
+
+        let _ = AppendMenuW(menu, MF_STRING, MENU_ID_WSL as usize, windows::core::PCWSTR(wsl_text.as_ptr()));
+        let _ = AppendMenuW(menu, MF_STRING, MENU_ID_CMD as usize, windows::core::PCWSTR(cmd_text.as_ptr()));
+        let _ = AppendMenuW(menu, MF_STRING, MENU_ID_POWERSHELL as usize, windows::core::PCWSTR(ps_text.as_ptr()));
+
+        let mut pt = POINT { x: 0, y: 0 };
+        let _ = GetCursorPos(&mut pt);
+
+        let result = TrackPopupMenu(
+            menu,
+            TPM_RETURNCMD | TPM_LEFTBUTTON,
+            pt.x,
+            pt.y,
+            Some(0),
+            hwnd,
+            None,
+        );
+
+        let _ = DestroyMenu(menu);
+
+        if result.as_bool() {
+            let selected = result.0 as u32;
+            let shell = match selected {
+                MENU_ID_WSL => ShellType::Wsl,
+                MENU_ID_CMD => ShellType::Cmd,
+                MENU_ID_POWERSHELL => ShellType::PowerShell,
+                _ => return,
+            };
+            create_new_tab(hwnd, shell);
+        }
+    }
+}
+
+fn create_new_tab(hwnd: HWND, shell: ShellType) {
+    let app = match get_app(hwnd) {
+        Some(a) => a,
+        None => return,
+    };
+
+    let (tab_id, read_handle) = {
+        let mut app_lock = app.lock().unwrap();
+        let (cols, rows) = app_lock.grid_size();
+        let tab_id = match app_lock.add_tab(shell, cols, rows) {
+            Ok(id) => id,
+            Err(e) => {
+                eprintln!("[taaminalu] Failed to create tab: {}", e);
+                return;
+            }
+        };
+        let read_handle = {
+            let tab = app_lock.tabs.iter().find(|t| t.id == tab_id).unwrap();
+            match tab.dup_output_read() {
+                Ok(h) => h,
+                Err(e) => {
+                    eprintln!("[taaminalu] Failed to dup read handle: {}", e);
+                    return;
+                }
+            }
+        };
+        (tab_id, read_handle)
+    };
+
+    start_pty_reader(Arc::clone(&app), hwnd, read_handle, tab_id);
+    unsafe { let _ = InvalidateRect(Some(hwnd), None, false); }
+    notify_tsf_change(hwnd);
+}
+
+fn close_active_tab(hwnd: HWND) {
+    let app = match get_app(hwnd) {
+        Some(a) => a,
+        None => return,
+    };
+    let index = {
+        let app_lock = app.lock().unwrap();
+        app_lock.active_tab
+    };
+    close_tab_at(hwnd, index);
+}
+
+fn close_tab_at(hwnd: HWND, index: usize) {
+    let app = match get_app(hwnd) {
+        Some(a) => a,
+        None => return,
+    };
+    let should_close = {
+        let mut app_lock = app.lock().unwrap();
+        app_lock.close_tab(index)
+    };
+    if should_close {
+        unsafe { let _ = DestroyWindow(hwnd); }
+    } else {
+        unsafe { let _ = InvalidateRect(Some(hwnd), None, false); }
+        notify_tsf_change(hwnd);
+    }
+}
+
+fn switch_tab_relative(hwnd: HWND, delta: i32) {
+    let app = match get_app(hwnd) {
+        Some(a) => a,
+        None => return,
+    };
+    let mut app_lock = app.lock().unwrap();
+    let count = app_lock.tab_count();
+    if count <= 1 {
+        return;
+    }
+    let current = app_lock.active_tab as i32;
+    let next = ((current + delta) % count as i32 + count as i32) as usize % count;
+    app_lock.switch_tab(next);
+    drop(app_lock);
+    unsafe { let _ = InvalidateRect(Some(hwnd), None, false); }
+    notify_tsf_change(hwnd);
 }
 
 // --- 修飾キー状態 ---

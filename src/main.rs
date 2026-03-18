@@ -1,20 +1,18 @@
 mod app;
 mod pty;
 mod render;
+mod tab;
 mod term;
 mod tsf;
 mod window;
 
 use std::sync::{Arc, Mutex};
-use std::thread;
 
-use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, WPARAM};
-use windows::Win32::Storage::FileSystem::ReadFile;
+use windows::Win32::Foundation::HWND;
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
-use windows::Win32::UI::WindowsAndMessaging::{GetClientRect, PostMessageW};
+use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
 
 use app::App;
-use window::WM_PTY_OUTPUT;
 
 fn main() {
     eprintln!("[taaminalu] starting...");
@@ -45,73 +43,46 @@ fn main() {
         }
     };
 
-    // Renderer 初期化
-    {
-        let mut rect = windows::Win32::Foundation::RECT::default();
-        unsafe {
-            let _ = GetClientRect(hwnd, &mut rect);
-        }
-        let width = (rect.right - rect.left) as u32;
-        let height = (rect.bottom - rect.top) as u32;
-
-        let mut app_lock = app.lock().unwrap();
-        app_lock.init_renderer(hwnd, width.max(1), height.max(1));
-
-        // Renderer のセルサイズでグリッドサイズ再計算
-        if let Some(ref renderer) = app_lock.renderer {
-            let (cols, rows) = renderer.calc_grid_size(width, height);
-            if cols > 0 && rows > 0 {
-                app_lock.term.resize(cols, rows);
-                let _ = app_lock.pty.resize(cols as u16, rows as u16);
-            }
-        }
-    }
+    // Renderer 初期化 + 初期タブのグリッドリサイズ
+    init_renderer_and_resize(&app, hwnd);
 
     // TSF セットアップ
     let tsf_ctx = tsf::setup_tsf(Arc::clone(&app), hwnd).ok();
     // TSF コンテキストを window に保存（WM_PTY_OUTPUT で通知に使う）
     window::set_tsf_context(hwnd, tsf_ctx);
 
-    // PTY 読み取りスレッド（ハンドルを複製してロック不要にする）
-    let pty_read_handle = {
+    // 初期タブの PTY 読み取りスレッド
+    let (tab_id, pty_read_handle) = {
         let app_lock = app.lock().unwrap();
-        app_lock.pty.dup_output_read().expect("Failed to duplicate PTY read handle")
+        let tab = &app_lock.tabs[0];
+        let id = tab.id;
+        let handle = tab.dup_output_read().expect("Failed to duplicate PTY read handle");
+        (id, handle)
     };
-    start_pty_reader(Arc::clone(&app), hwnd, pty_read_handle);
+    window::start_pty_reader(Arc::clone(&app), hwnd, pty_read_handle, tab_id);
 
     // メッセージループ
     window::run_message_loop();
 }
 
-fn start_pty_reader(app: Arc<Mutex<App>>, hwnd: HWND, read_handle: HANDLE) {
-    let hwnd_val = hwnd.0 as usize;
-    let handle_val = read_handle.0 as usize;
+fn init_renderer_and_resize(app: &Arc<Mutex<App>>, hwnd: HWND) {
+    let mut rect = windows::Win32::Foundation::RECT::default();
+    unsafe {
+        let _ = GetClientRect(hwnd, &mut rect);
+    }
+    let width = (rect.right - rect.left) as u32;
+    let height = (rect.bottom - rect.top) as u32;
 
-    thread::spawn(move || {
-        let hwnd = HWND(hwnd_val as *mut _);
-        let read_handle = HANDLE(handle_val as *mut _);
-        let mut buf = [0u8; 4096];
-        loop {
-            let mut bytes_read = 0u32;
-            let ok = unsafe {
-                ReadFile(read_handle, Some(&mut buf), Some(&mut bytes_read), None)
-            };
-            match ok {
-                Ok(()) if bytes_read == 0 => break,
-                Ok(()) => {
-                    let n = bytes_read as usize;
-                    let mut app_lock = app.lock().unwrap();
-                    app_lock.process_pty_output(&buf[..n]);
-                    drop(app_lock);
-                    unsafe {
-                        let _ = PostMessageW(Some(hwnd), WM_PTY_OUTPUT, WPARAM(0), LPARAM(0));
-                    }
-                }
-                Err(_) => break,
+    let mut app_lock = app.lock().unwrap();
+    app_lock.init_renderer(hwnd, width.max(1), height.max(1));
+
+    // Renderer のセルサイズでグリッドサイズ再計算（タブバー高さ考慮済み）
+    if let Some(ref renderer) = app_lock.renderer {
+        let (cols, rows) = renderer.calc_grid_size(width, height);
+        if cols > 0 && rows > 0 {
+            for tab in &mut app_lock.tabs {
+                tab.resize(cols, rows);
             }
         }
-        unsafe {
-            let _ = CloseHandle(read_handle);
-        }
-    });
+    }
 }

@@ -16,6 +16,31 @@ use windows::Win32::System::Threading::{
     STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ShellType {
+    Wsl,
+    Cmd,
+    PowerShell,
+}
+
+impl ShellType {
+    pub fn label(&self) -> &'static str {
+        match self {
+            ShellType::Wsl => "WSL",
+            ShellType::Cmd => "CMD",
+            ShellType::PowerShell => "PowerShell",
+        }
+    }
+
+    fn command(&self) -> &'static str {
+        match self {
+            ShellType::Wsl => "wsl.exe\0",
+            ShellType::Cmd => "cmd.exe\0",
+            ShellType::PowerShell => "powershell.exe\0",
+        }
+    }
+}
+
 pub struct Pty {
     hpc: HPCON,
     pub input_write: HANDLE,
@@ -29,11 +54,11 @@ unsafe impl Send for Pty {}
 unsafe impl Sync for Pty {}
 
 impl Pty {
-    pub fn new(cols: u16, rows: u16) -> io::Result<Self> {
-        unsafe { Self::create(cols, rows) }
+    pub fn new(cols: u16, rows: u16, shell: ShellType) -> io::Result<Self> {
+        unsafe { Self::create(cols, rows, shell) }
     }
 
-    unsafe fn create(cols: u16, rows: u16) -> io::Result<Self> {
+    unsafe fn create(cols: u16, rows: u16, shell: ShellType) -> io::Result<Self> {
         let size = COORD {
             X: cols as i16,
             Y: rows as i16,
@@ -105,7 +130,7 @@ impl Pty {
         };
 
         let mut pi = PROCESS_INFORMATION::default();
-        let mut cmd: Vec<u16> = "wsl.exe\0".encode_utf16().collect();
+        let mut cmd: Vec<u16> = shell.command().encode_utf16().collect();
 
         unsafe {
             CreateProcessW(

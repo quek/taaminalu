@@ -332,23 +332,26 @@ impl ITextStoreACP_Impl for TextStore_Impl {
         let pt = unsafe { *ptscreen };
         let app = self.app.lock().unwrap();
         let (cell_w, cell_h) = app.cell_size();
+        let (_, grid_y) = app.grid_origin();
         let mut client_pt = pt;
         unsafe { let _ = ScreenToClient(self.hwnd, &mut client_pt); }
         let col = (client_pt.x as f32 / cell_w) as usize;
-        let row = (client_pt.y as f32 / cell_h) as usize;
-        let acp = app.term.grid_to_acp(row, col);
+        let row = ((client_pt.y as f32 - grid_y) / cell_h).max(0.0) as usize;
+        let acp = app.active().term.grid_to_acp(row, col);
         Ok(acp as i32)
     }
 
     fn GetTextExt(&self, _vcview: u32, acpstart: i32, acpend: i32, prc: *mut RECT, pfclipped: *mut BOOL) -> Result<()> {
         let app = self.app.lock().unwrap();
         let (cell_w, cell_h) = app.cell_size();
+        let (_, grid_y) = app.grid_origin();
+        let grid_y_i = grid_y as i32;
         let (start_row, start_col) = app.acp_to_grid(acpstart as usize);
 
         let mut rect = if acpstart == acpend {
             // zero-width: カーソル位置（IME 候補ウィンドウの位置決め用）
             let x = (start_col as f32 * cell_w) as i32;
-            let y = (start_row as f32 * cell_h) as i32;
+            let y = (start_row as f32 * cell_h) as i32 + grid_y_i;
             RECT {
                 left: x,
                 top: y,
@@ -359,9 +362,9 @@ impl ITextStoreACP_Impl for TextStore_Impl {
             let (end_row, end_col) = app.acp_to_grid(acpend as usize);
             RECT {
                 left: (start_col as f32 * cell_w) as i32,
-                top: (start_row as f32 * cell_h) as i32,
+                top: (start_row as f32 * cell_h) as i32 + grid_y_i,
                 right: (end_col as f32 * cell_w) as i32,
-                bottom: ((end_row + 1) as f32 * cell_h) as i32,
+                bottom: ((end_row + 1) as f32 * cell_h) as i32 + grid_y_i,
             }
         };
 
