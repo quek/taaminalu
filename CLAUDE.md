@@ -1,4 +1,4 @@
-# taaminaru - TSF対応ターミナルエミュレータ
+# taaminalu - TSF対応ターミナルエミュレータ
 
 TSF `ITextStoreACP` を実装し、ターミナルバッファの内容を IME に公開するターミナルエミュレータ。
 Rust + Win32 (Direct2D/DirectWrite) で実装。WSL2 に ConPTY 経由で接続。
