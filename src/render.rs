@@ -18,7 +18,7 @@ use alacritty_terminal::vte::ansi::{Color, NamedColor};
 
 use crate::term::TermWrapper;
 
-const FONT_NAME: &str = "Consolas";
+const FONT_NAME: &str = "HackGen Console NF";
 const FONT_SIZE: f32 = 16.0;
 const CURSOR_COLOR: D2D1_COLOR_F = D2D1_COLOR_F {
     r: 0xCC as f32 / 255.0,
