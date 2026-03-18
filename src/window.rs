@@ -92,6 +92,11 @@ pub fn create_window(app: Arc<Mutex<App>>) -> windows::core::Result<HWND> {
     unsafe {
         let hinstance = GetModuleHandleW(None)?;
 
+        let hicon = LoadIconW(
+            Some(windows::Win32::Foundation::HINSTANCE(hinstance.0)),
+            windows::core::PCWSTR(1 as *const u16),
+        )?;
+
         let wc = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
             style: CS_HREDRAW | CS_VREDRAW,
@@ -99,6 +104,8 @@ pub fn create_window(app: Arc<Mutex<App>>) -> windows::core::Result<HWND> {
             hInstance: hinstance.into(),
             lpszClassName: windows::core::PCWSTR(class_name_wide.as_ptr()),
             hCursor: LoadCursorW(None, IDC_ARROW)?,
+            hIcon: hicon,
+            hIconSm: hicon,
             ..Default::default()
         };
 
