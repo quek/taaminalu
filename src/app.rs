@@ -1,6 +1,7 @@
 use std::io;
 
 use windows::Win32::Foundation::HWND;
+use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
 
 use crate::pty::ShellType;
 use crate::render::Renderer;
@@ -23,9 +24,23 @@ impl App {
         })
     }
 
-    pub fn init_renderer(&mut self, hwnd: HWND, width: u32, height: u32) {
+    /// Renderer を初期化し、グリッドサイズを再計算して全タブをリサイズ
+    pub fn init_renderer(&mut self, hwnd: HWND) {
+        let mut rect = windows::Win32::Foundation::RECT::default();
+        unsafe { let _ = GetClientRect(hwnd, &mut rect); }
+        let width = (rect.right - rect.left).max(1) as u32;
+        let height = (rect.bottom - rect.top).max(1) as u32;
+
         match Renderer::new(hwnd, width, height) {
-            Ok(renderer) => self.renderer = Some(renderer),
+            Ok(renderer) => {
+                let (cols, rows) = renderer.calc_grid_size(width, height);
+                self.renderer = Some(renderer);
+                if cols > 0 && rows > 0 {
+                    for tab in &mut self.tabs {
+                        tab.resize(cols, rows);
+                    }
+                }
+            }
             Err(e) => eprintln!("Renderer init failed: {}", e),
         }
     }
@@ -36,7 +51,6 @@ impl App {
 
     pub fn paint(&self, hwnd: HWND) {
         if let Some(ref renderer) = self.renderer {
-            // タブ情報を収集
             let tab_infos: Vec<(&str, TabId)> = self.tabs.iter()
                 .map(|t| (t.title.as_str(), t.id))
                 .collect();
@@ -62,6 +76,8 @@ impl App {
         }
     }
 
+    // --- アクティブタブへの委譲 ---
+
     pub fn write_pty(&self, data: &[u8]) -> io::Result<usize> {
         self.active().write_pty(data)
     }
@@ -70,16 +86,8 @@ impl App {
         self.active().term.screen_text()
     }
 
-    pub fn cursor_pos(&self) -> (usize, usize) {
-        self.active().term.cursor_pos()
-    }
-
     pub fn cursor_acp(&self) -> usize {
         self.active().term.cursor_acp()
-    }
-
-    pub fn columns(&self) -> usize {
-        self.active().term.columns()
     }
 
     pub fn acp_to_grid(&self, acp: usize) -> (usize, usize) {
@@ -87,19 +95,15 @@ impl App {
     }
 
     pub fn cell_size(&self) -> (f32, f32) {
-        if let Some(ref renderer) = self.renderer {
-            (renderer.cell_width, renderer.cell_height)
-        } else {
-            (8.0, 16.0)
-        }
+        self.renderer.as_ref()
+            .map(|r| (r.cell_width, r.cell_height))
+            .unwrap_or((8.0, 16.0))
     }
 
     pub fn grid_origin(&self) -> (f32, f32) {
-        if let Some(ref renderer) = self.renderer {
-            (0.0, renderer.tab_bar_height())
-        } else {
-            (0.0, 30.0)
-        }
+        self.renderer.as_ref()
+            .map(|r| (0.0, r.tab_bar_height()))
+            .unwrap_or((0.0, 30.0))
     }
 
     // --- タブ管理 ---
@@ -112,13 +116,14 @@ impl App {
         Ok(id)
     }
 
+    /// タブを閉じる。最後のタブだった場合は true を返す
     pub fn close_tab(&mut self, index: usize) -> bool {
         if index >= self.tabs.len() {
             return false;
         }
         self.tabs.remove(index);
         if self.tabs.is_empty() {
-            return true; // 最後のタブ → ウィンドウを閉じる
+            return true;
         }
         if self.active_tab >= self.tabs.len() {
             self.active_tab = self.tabs.len() - 1;
@@ -145,11 +150,8 @@ impl App {
     }
 
     pub fn grid_size(&self) -> (usize, usize) {
-        if let Some(ref renderer) = self.renderer {
-            let size = unsafe { renderer.rt_size() };
-            renderer.calc_grid_size(size.0, size.1)
-        } else {
-            (80, 24)
-        }
+        self.renderer.as_ref()
+            .map(|r| r.current_grid_size())
+            .unwrap_or((80, 24))
     }
 }

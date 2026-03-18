@@ -10,7 +10,7 @@ use windows::Win32::System::Console::{
 };
 use windows::Win32::System::Pipes::CreatePipe;
 use windows::Win32::System::Threading::{
-    CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
+    CreateProcessW, DeleteProcThreadAttributeList,
     InitializeProcThreadAttributeList, UpdateProcThreadAttribute, EXTENDED_STARTUPINFO_PRESENT,
     LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
     STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW,
@@ -43,8 +43,8 @@ impl ShellType {
 
 pub struct Pty {
     hpc: HPCON,
-    pub input_write: HANDLE,
-    pub output_read: HANDLE,
+    input_write: HANDLE,
+    output_read: HANDLE,
     process: HANDLE,
     thread: HANDLE,
 }
@@ -52,6 +52,17 @@ pub struct Pty {
 // HANDLE は Send safe（カーネルオブジェクト）
 unsafe impl Send for Pty {}
 unsafe impl Sync for Pty {}
+
+/// ハンドルを複製して返す
+fn dup_handle(src: HANDLE) -> io::Result<HANDLE> {
+    let mut dup = HANDLE::default();
+    unsafe {
+        let process = GetCurrentProcess();
+        DuplicateHandle(process, src, process, &mut dup, 0, false, DUPLICATE_SAME_ACCESS)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    }
+    Ok(dup)
+}
 
 impl Pty {
     pub fn new(cols: u16, rows: u16, shell: ShellType) -> io::Result<Self> {
@@ -159,17 +170,6 @@ impl Pty {
         })
     }
 
-    /// PTY から読み取り（同期 I/O、別スレッドで呼ぶ）
-    pub fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
-        use windows::Win32::Storage::FileSystem::ReadFile;
-        let mut bytes_read = 0u32;
-        unsafe {
-            ReadFile(self.output_read, Some(buf), Some(&mut bytes_read), None)
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-        }
-        Ok(bytes_read as usize)
-    }
-
     /// PTY に書き込み
     pub fn write(&self, data: &[u8]) -> io::Result<usize> {
         use windows::Win32::Storage::FileSystem::WriteFile;
@@ -181,38 +181,14 @@ impl Pty {
         Ok(bytes_written as usize)
     }
 
-    /// プロセスの終了コードを取得 (259 = STILL_ACTIVE = まだ実行中)
-    pub fn exit_code(&self) -> Option<u32> {
-        let mut code = 0u32;
-        unsafe {
-            if GetExitCodeProcess(self.process, &mut code).is_ok() {
-                Some(code)
-            } else {
-                None
-            }
-        }
-    }
-
     /// プロセスハンドルを複製して返す（プロセス監視スレッド用）
     pub fn dup_process_handle(&self) -> io::Result<HANDLE> {
-        let mut dup = HANDLE::default();
-        unsafe {
-            let process = GetCurrentProcess();
-            DuplicateHandle(process, self.process, process, &mut dup, 0, false, DUPLICATE_SAME_ACCESS)
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-        }
-        Ok(dup)
+        dup_handle(self.process)
     }
 
     /// 読み取りハンドルを複製して返す（読み取りスレッド用）
     pub fn dup_output_read(&self) -> io::Result<HANDLE> {
-        let mut dup = HANDLE::default();
-        unsafe {
-            let process = GetCurrentProcess();
-            DuplicateHandle(process, self.output_read, process, &mut dup, 0, false, DUPLICATE_SAME_ACCESS)
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-        }
-        Ok(dup)
+        dup_handle(self.output_read)
     }
 
     /// ターミナルサイズ変更

@@ -6,17 +6,15 @@ use std::thread;
 
 use serde::{Deserialize, Serialize};
 use windows::Win32::Foundation::{
-    CloseHandle, HGLOBAL, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM, HANDLE,
+    CloseHandle, HGLOBAL, HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
 };
 use windows::Win32::Graphics::Gdi::InvalidateRect;
 use windows::Win32::Storage::FileSystem::ReadFile;
+use windows::Win32::System::DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::Threading::{WaitForSingleObject, INFINITE};
-use windows::Win32::System::DataExchange::GetClipboardData;
-use windows::Win32::System::DataExchange::{CloseClipboard, OpenClipboard};
-use windows::Win32::System::Memory::GlobalLock;
-use windows::Win32::System::Memory::GlobalUnlock;
+use windows::Win32::System::Memory::{GlobalLock, GlobalUnlock};
 use windows::Win32::System::Ole::CF_UNICODETEXT;
+use windows::Win32::System::Threading::{WaitForSingleObject, INFINITE};
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -399,16 +397,12 @@ unsafe extern "system" fn wnd_proc(
         }
         WM_DESTROY => {
             save_geometry(hwnd);
-            let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut Arc<Mutex<App>>;
-            if !ptr.is_null() {
-                unsafe {
+            unsafe {
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut Arc<Mutex<App>>;
+                if !ptr.is_null() {
                     drop(Box::from_raw(ptr));
-                }
-                unsafe {
                     SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
                 }
-            }
-            unsafe {
                 PostQuitMessage(0);
             }
             LRESULT(0)
