@@ -1,3 +1,5 @@
+#![windows_subsystem = "windows"]
+
 mod app;
 mod pty;
 mod render;
@@ -13,8 +15,6 @@ use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
 use app::App;
 
 fn main() {
-    eprintln!("[taaminalu] starting...");
-
     // COM 初期化（STA — TSF に必要）
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
