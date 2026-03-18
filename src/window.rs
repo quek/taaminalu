@@ -12,7 +12,7 @@ use windows::Win32::Graphics::Gdi::InvalidateRect;
 use windows::Win32::Storage::FileSystem::ReadFile;
 use windows::Win32::System::DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::Memory::{GlobalLock, GlobalUnlock};
+use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
 use windows::Win32::System::Ole::CF_UNICODETEXT;
 use windows::Win32::System::Threading::{WaitForSingleObject, INFINITE};
 use windows::Win32::UI::Input::Ime::{
@@ -820,11 +820,14 @@ fn paste_from_clipboard(hwnd: HWND) {
         }
         let handle = GetClipboardData(CF_UNICODETEXT.0 as u32);
         if let Ok(handle) = handle {
-            let ptr = GlobalLock(HGLOBAL(handle.0)) as *const u16;
+            let hglobal = HGLOBAL(handle.0);
+            let ptr = GlobalLock(hglobal) as *const u16;
             if !ptr.is_null() {
-                // null 終端の UTF-16 文字列を読み取り
+                // GlobalSize でバッファサイズを取得し、上限を設定して null 終端スキャン
+                let buf_bytes = GlobalSize(hglobal);
+                let max_u16 = buf_bytes / 2;
                 let mut len = 0;
-                while *ptr.add(len) != 0 {
+                while len < max_u16 && *ptr.add(len) != 0 {
                     len += 1;
                 }
                 let slice = std::slice::from_raw_parts(ptr, len);
@@ -835,7 +838,7 @@ fn paste_from_clipboard(hwnd: HWND) {
                         let _ = app.write_pty(text.as_bytes());
                     }
                 }
-                let _ = GlobalUnlock(HGLOBAL(handle.0));
+                let _ = GlobalUnlock(hglobal);
             }
         }
         let _ = CloseClipboard();

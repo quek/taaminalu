@@ -73,7 +73,7 @@ impl TextStore {
     fn cursor_to_acp(&self) -> i32 {
         let preedit_len = self.composition.lock().unwrap().preedit.encode_utf16().count() as i32;
         let app = self.app.lock().unwrap();
-        app.cursor_acp() as i32 + preedit_len
+        (app.cursor_acp() as i32).saturating_add(preedit_len)
     }
 
     /// ターミナルバッファ上のカーソル ACP（preedit を含まない）
@@ -349,7 +349,7 @@ impl ITextStoreACP_Impl for TextStore_Impl {
         };
         let base_acp = self.base_cursor_acp();
         // composition 中は preedit 末尾が挿入点
-        let insert_acp = base_acp + preedit_len;
+        let insert_acp = base_acp.saturating_add(preedit_len);
 
         if dwflags & TF_IAS_QUERYONLY.0 as u32 != 0 {
             unsafe {
@@ -372,7 +372,7 @@ impl ITextStoreACP_Impl for TextStore_Impl {
             let _ = app.write_pty(text.as_bytes());
         }
 
-        let new_end = insert_acp + cch as i32;
+        let new_end = insert_acp.saturating_add(cch as i32);
         unsafe {
             if !pacpstart.is_null() { *pacpstart = insert_acp; }
             if !pacpend.is_null() { *pacpend = new_end; }
