@@ -4,9 +4,15 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{HGLOBAL, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::InvalidateRect;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::DataExchange::GetClipboardData;
+use windows::Win32::System::DataExchange::{CloseClipboard, OpenClipboard};
+use windows::Win32::System::Memory::GlobalLock;
+use windows::Win32::System::Memory::GlobalUnlock;
+use windows::Win32::System::Ole::CF_UNICODETEXT;
+use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::app::App;
@@ -98,7 +104,6 @@ pub fn create_window(app: Arc<Mutex<App>>) -> windows::core::Result<HWND> {
 
         RegisterClassExW(&wc);
 
-        // App を Box でヒープに確保して LPARAM で渡す
         let app_ptr = Box::into_raw(Box::new(app));
 
         let (x, y, w, h) = match load_geometry() {
@@ -170,14 +175,25 @@ unsafe extern "system" fn wnd_proc(
             }
             LRESULT(0)
         }
-        WM_CHAR => {
+        WM_CHAR | WM_SYSCHAR => {
             let ch = wparam.0 as u32;
             if let Some(c) = char::from_u32(ch) {
-                // WM_KEYDOWN で処理済みのキーは WM_CHAR では送らない
-                if !is_handled_by_keydown(c) {
-                    let app = get_app(hwnd);
-                    if let Some(app) = app {
-                        let app = app.lock().unwrap();
+                // VK_BACK は WM_KEYDOWN で 0x7F として送信済み
+                if c == '\x7f' {
+                    return LRESULT(0);
+                }
+                let app = get_app(hwnd);
+                if let Some(app) = app {
+                    let app = app.lock().unwrap();
+                    // Alt が押されていたら ESC プレフィックス付き
+                    let alt = (lparam.0 >> 29) & 1 != 0; // bit 29 = context code (Alt)
+                    if alt && c.is_ascii() {
+                        let mut buf = vec![0x1bu8]; // ESC
+                        let mut char_buf = [0u8; 4];
+                        let s = c.encode_utf8(&mut char_buf);
+                        buf.extend_from_slice(s.as_bytes());
+                        let _ = app.write_pty(&buf);
+                    } else {
                         let mut buf = [0u8; 4];
                         let s = c.encode_utf8(&mut buf);
                         let _ = app.write_pty(s.as_bytes());
@@ -186,30 +202,42 @@ unsafe extern "system" fn wnd_proc(
             }
             LRESULT(0)
         }
-        WM_KEYDOWN => {
-            let vk = wparam.0 as u16;
-            let seq = vk_to_escape_seq(vk);
-            if let Some(seq) = seq {
+        WM_KEYDOWN | WM_SYSKEYDOWN => {
+            let vk = VIRTUAL_KEY(wparam.0 as u16);
+            let mods = get_modifiers();
+
+            // Ctrl+Shift+V: ペースト
+            if vk == VK_V && mods.ctrl && mods.shift {
+                paste_from_clipboard(hwnd);
+                return LRESULT(0);
+            }
+
+            // 特殊キーのエスケープシーケンス
+            if let Some(seq) = build_key_sequence(vk, &mods) {
                 let app = get_app(hwnd);
                 if let Some(app) = app {
                     let app = app.lock().unwrap();
-                    let _ = app.write_pty(seq);
+                    let _ = app.write_pty(&seq);
                 }
+                return LRESULT(0);
             }
+
+            // Alt+key は WM_SYSCHAR に任せるため DefWindowProc に渡す
+            if mods.alt && !mods.ctrl {
+                return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
+            }
+
             LRESULT(0)
         }
         WM_PTY_OUTPUT => {
             unsafe {
                 let _ = InvalidateRect(Some(hwnd), None, false);
             }
-            // TSF シンクにテキスト/カーソル変更を通知
             notify_tsf_change(hwnd);
             LRESULT(0)
         }
         WM_DESTROY => {
-            // ウィンドウ位置・サイズを保存
             save_geometry(hwnd);
-            // App ポインタをクリーンアップ
             let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut Arc<Mutex<App>>;
             if !ptr.is_null() {
                 unsafe {
@@ -237,29 +265,177 @@ fn get_app(hwnd: HWND) -> Option<Arc<Mutex<App>>> {
     Some(Arc::clone(app))
 }
 
-/// WM_KEYDOWN で処理済みで WM_CHAR では送らないキー
-fn is_handled_by_keydown(c: char) -> bool {
-    matches!(c, '\r' | '\x7f' | '\x08' | '\t' | '\x1b')
+// --- 修飾キー状態 ---
+
+struct Modifiers {
+    shift: bool,
+    alt: bool,
+    ctrl: bool,
 }
 
-/// 仮想キーコード → VT エスケープシーケンス
-fn vk_to_escape_seq(vk: u16) -> Option<&'static [u8]> {
-    use windows::Win32::UI::Input::KeyboardAndMouse::*;
-    match VIRTUAL_KEY(vk) {
-        VK_UP => Some(b"\x1b[A"),
-        VK_DOWN => Some(b"\x1b[B"),
-        VK_RIGHT => Some(b"\x1b[C"),
-        VK_LEFT => Some(b"\x1b[D"),
-        VK_HOME => Some(b"\x1b[H"),
-        VK_END => Some(b"\x1b[F"),
-        VK_DELETE => Some(b"\x1b[3~"),
-        VK_PRIOR => Some(b"\x1b[5~"), // Page Up
-        VK_NEXT => Some(b"\x1b[6~"),  // Page Down
-        VK_INSERT => Some(b"\x1b[2~"),
-        VK_RETURN => Some(b"\r"),
-        VK_BACK => Some(b"\x7f"),
-        VK_TAB => Some(b"\t"),
-        VK_ESCAPE => Some(b"\x1b"),
+fn get_modifiers() -> Modifiers {
+    unsafe {
+        Modifiers {
+            shift: GetKeyState(VK_SHIFT.0 as i32) < 0,
+            alt: GetKeyState(VK_MENU.0 as i32) < 0,
+            ctrl: GetKeyState(VK_CONTROL.0 as i32) < 0,
+        }
+    }
+}
+
+/// xterm 修飾キーパラメータ: 1 + (Shift=1 | Alt=2 | Ctrl=4)
+fn modifier_param(mods: &Modifiers) -> u8 {
+    let mut p = 0u8;
+    if mods.shift { p |= 1; }
+    if mods.alt { p |= 2; }
+    if mods.ctrl { p |= 4; }
+    1 + p
+}
+
+fn has_modifiers(mods: &Modifiers) -> bool {
+    mods.shift || mods.alt || mods.ctrl
+}
+
+// --- キーシーケンス生成 ---
+
+/// 特殊キー → VT エスケープシーケンス (修飾キー対応)
+fn build_key_sequence(vk: VIRTUAL_KEY, mods: &Modifiers) -> Option<Vec<u8>> {
+    // Backspace: 修飾キー対応
+    if vk == VK_BACK {
+        let mut seq = Vec::new();
+        if mods.alt { seq.push(0x1b); }
+        if mods.ctrl {
+            seq.push(0x08); // Ctrl+Backspace = BS
+        } else {
+            seq.push(0x7f); // Backspace = DEL
+        }
+        return Some(seq);
+    }
+
+    // CSI キー: 矢印、Home/End、Insert/Delete、PageUp/Down
+    if let Some((code, suffix)) = csi_key_params(vk) {
+        let mp = modifier_param(mods);
+        let seq = if mp > 1 {
+            // 修飾キーあり: \x1b[1;{mod}{suffix} or \x1b[{code};{mod}~
+            if suffix == b'~' {
+                format!("\x1b[{};{}~", code, mp).into_bytes()
+            } else {
+                format!("\x1b[1;{}{}", mp, suffix as char).into_bytes()
+            }
+        } else {
+            // 修飾キーなし
+            if suffix == b'~' {
+                format!("\x1b[{}~", code).into_bytes()
+            } else {
+                vec![0x1b, b'[', suffix]
+            }
+        };
+        return Some(seq);
+    }
+
+    // ファンクションキー F1-F12
+    if let Some(seq) = function_key_sequence(vk, mods) {
+        return Some(seq);
+    }
+
+    None
+}
+
+/// CSI キーのパラメータ: (数値コード, サフィックス文字)
+/// サフィックスが '~' の場合は \x1b[{code}~ 形式
+/// それ以外は \x1b[{suffix} 形式
+fn csi_key_params(vk: VIRTUAL_KEY) -> Option<(u8, u8)> {
+    match vk {
+        VK_UP => Some((1, b'A')),
+        VK_DOWN => Some((1, b'B')),
+        VK_RIGHT => Some((1, b'C')),
+        VK_LEFT => Some((1, b'D')),
+        VK_HOME => Some((1, b'H')),
+        VK_END => Some((1, b'F')),
+        VK_INSERT => Some((2, b'~')),
+        VK_DELETE => Some((3, b'~')),
+        VK_PRIOR => Some((5, b'~')), // Page Up
+        VK_NEXT => Some((6, b'~')),  // Page Down
         _ => None,
+    }
+}
+
+/// ファンクションキー F1-F12 → エスケープシーケンス
+fn function_key_sequence(vk: VIRTUAL_KEY, mods: &Modifiers) -> Option<Vec<u8>> {
+    // F1-F4: SS3 形式 (修飾キーなし), CSI 形式 (修飾キーあり)
+    // F5-F12: CSI {code}~ 形式
+    let mp = modifier_param(mods);
+    let has_mods = has_modifiers(mods);
+
+    match vk {
+        VK_F1 => Some(if has_mods {
+            format!("\x1b[1;{}P", mp).into_bytes()
+        } else {
+            b"\x1bOP".to_vec()
+        }),
+        VK_F2 => Some(if has_mods {
+            format!("\x1b[1;{}Q", mp).into_bytes()
+        } else {
+            b"\x1bOQ".to_vec()
+        }),
+        VK_F3 => Some(if has_mods {
+            format!("\x1b[1;{}R", mp).into_bytes()
+        } else {
+            b"\x1bOR".to_vec()
+        }),
+        VK_F4 => Some(if has_mods {
+            format!("\x1b[1;{}S", mp).into_bytes()
+        } else {
+            b"\x1bOS".to_vec()
+        }),
+        VK_F5 => Some(fkey_csi(15, mp, has_mods)),
+        VK_F6 => Some(fkey_csi(17, mp, has_mods)),
+        VK_F7 => Some(fkey_csi(18, mp, has_mods)),
+        VK_F8 => Some(fkey_csi(19, mp, has_mods)),
+        VK_F9 => Some(fkey_csi(20, mp, has_mods)),
+        VK_F10 => Some(fkey_csi(21, mp, has_mods)),
+        VK_F11 => Some(fkey_csi(23, mp, has_mods)),
+        VK_F12 => Some(fkey_csi(24, mp, has_mods)),
+        _ => None,
+    }
+}
+
+/// F5-F12 の CSI シーケンス: \x1b[{code}~ or \x1b[{code};{mod}~
+fn fkey_csi(code: u8, mp: u8, has_mods: bool) -> Vec<u8> {
+    if has_mods {
+        format!("\x1b[{};{}~", code, mp).into_bytes()
+    } else {
+        format!("\x1b[{}~", code).into_bytes()
+    }
+}
+
+// --- クリップボード ---
+
+fn paste_from_clipboard(hwnd: HWND) {
+    unsafe {
+        if OpenClipboard(Some(hwnd)).is_err() {
+            return;
+        }
+        let handle = GetClipboardData(CF_UNICODETEXT.0 as u32);
+        if let Ok(handle) = handle {
+            let ptr = GlobalLock(HGLOBAL(handle.0)) as *const u16;
+            if !ptr.is_null() {
+                // null 終端の UTF-16 文字列を読み取り
+                let mut len = 0;
+                while *ptr.add(len) != 0 {
+                    len += 1;
+                }
+                let slice = std::slice::from_raw_parts(ptr, len);
+                if let Ok(text) = String::from_utf16(slice) {
+                    let app = get_app(hwnd);
+                    if let Some(app) = app {
+                        let app = app.lock().unwrap();
+                        let _ = app.write_pty(text.as_bytes());
+                    }
+                }
+                let _ = GlobalUnlock(HGLOBAL(handle.0));
+            }
+        }
+        let _ = CloseClipboard();
     }
 }
