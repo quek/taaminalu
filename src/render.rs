@@ -12,7 +12,8 @@ use windows::Win32::Graphics::Direct2D::{
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL,
-    DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_REGULAR, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
+    DWRITE_FONT_STYLE_ITALIC, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_BOLD,
+    DWRITE_FONT_WEIGHT_REGULAR, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
     DWRITE_TEXT_ALIGNMENT_CENTER, IDWriteFactory, IDWriteTextFormat,
 };
 use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, PAINTSTRUCT};
@@ -91,6 +92,38 @@ fn color_to_d2d(color: &Color) -> D2D1_COLOR_F {
     rgb(r, g, b)
 }
 
+/// BOLD 時に Named color (0-7) を Bright variant (8-15) に変換
+fn bold_color(color: &Color) -> D2D1_COLOR_F {
+    match color {
+        Color::Named(named) => {
+            let bright = match named {
+                NamedColor::Black => NamedColor::BrightBlack,
+                NamedColor::Red => NamedColor::BrightRed,
+                NamedColor::Green => NamedColor::BrightGreen,
+                NamedColor::Yellow => NamedColor::BrightYellow,
+                NamedColor::Blue => NamedColor::BrightBlue,
+                NamedColor::Magenta => NamedColor::BrightMagenta,
+                NamedColor::Cyan => NamedColor::BrightCyan,
+                NamedColor::White => NamedColor::BrightWhite,
+                other => *other,
+            };
+            let (r, g, b) = named_color_rgb(&bright);
+            rgb(r, g, b)
+        }
+        _ => color_to_d2d(color),
+    }
+}
+
+/// DIM: 前景色の輝度を半分にする
+fn dim_color(color: &D2D1_COLOR_F) -> D2D1_COLOR_F {
+    D2D1_COLOR_F {
+        r: color.r * 0.5,
+        g: color.g * 0.5,
+        b: color.b * 0.5,
+        a: color.a,
+    }
+}
+
 fn named_color_rgb(named: &NamedColor) -> (u8, u8, u8) {
     match named {
         NamedColor::Black => ANSI_COLORS[0],
@@ -146,6 +179,9 @@ pub struct Renderer {
     rt: ID2D1HwndRenderTarget,
     dwrite_factory: IDWriteFactory,
     text_format: IDWriteTextFormat,
+    bold_text_format: IDWriteTextFormat,
+    italic_text_format: IDWriteTextFormat,
+    bold_italic_text_format: IDWriteTextFormat,
     tab_text_format: IDWriteTextFormat,
     pub cell_width: f32,
     pub cell_height: f32,
@@ -186,6 +222,42 @@ impl Renderer {
             )?
         };
 
+        let bold_text_format = unsafe {
+            dwrite_factory.CreateTextFormat(
+                windows::core::PCWSTR(font_name_wide.as_ptr()),
+                None,
+                DWRITE_FONT_WEIGHT_BOLD,
+                DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL,
+                FONT_SIZE,
+                windows::core::PCWSTR(locale_wide.as_ptr()),
+            )?
+        };
+
+        let italic_text_format = unsafe {
+            dwrite_factory.CreateTextFormat(
+                windows::core::PCWSTR(font_name_wide.as_ptr()),
+                None,
+                DWRITE_FONT_WEIGHT_REGULAR,
+                DWRITE_FONT_STYLE_ITALIC,
+                DWRITE_FONT_STRETCH_NORMAL,
+                FONT_SIZE,
+                windows::core::PCWSTR(locale_wide.as_ptr()),
+            )?
+        };
+
+        let bold_italic_text_format = unsafe {
+            dwrite_factory.CreateTextFormat(
+                windows::core::PCWSTR(font_name_wide.as_ptr()),
+                None,
+                DWRITE_FONT_WEIGHT_BOLD,
+                DWRITE_FONT_STYLE_ITALIC,
+                DWRITE_FONT_STRETCH_NORMAL,
+                FONT_SIZE,
+                windows::core::PCWSTR(locale_wide.as_ptr()),
+            )?
+        };
+
         let tab_text_format = unsafe {
             let fmt = dwrite_factory.CreateTextFormat(
                 windows::core::PCWSTR(font_name_wide.as_ptr()),
@@ -203,7 +275,12 @@ impl Renderer {
 
         let (cell_width, cell_height) = Self::measure_cell(&dwrite_factory, &text_format)?;
 
-        Ok(Self { rt, dwrite_factory, text_format, tab_text_format, cell_width, cell_height, brush_cache: RefCell::new(HashMap::new()) })
+        Ok(Self {
+            rt, dwrite_factory,
+            text_format, bold_text_format, italic_text_format, bold_italic_text_format,
+            tab_text_format, cell_width, cell_height,
+            brush_cache: RefCell::new(HashMap::new()),
+        })
     }
 
     fn measure_cell(
@@ -410,13 +487,29 @@ impl Renderer {
                     let is_wide = cell.flags.contains(Flags::WIDE_CHAR);
                     let cell_w = if is_wide { self.cell_width * 2.0 } else { self.cell_width };
 
-                    // INVERSE フラグで前景色と背景色を入れ替え
-                    let is_inverse = cell.flags.contains(Flags::INVERSE);
-                    let (cell_fg, cell_bg) = if is_inverse {
-                        (color_to_d2d(&cell.bg), color_to_d2d(&cell.fg))
+                    // セル属性フラグ
+                    let flags = cell.flags;
+                    let is_inverse = flags.contains(Flags::INVERSE);
+                    let is_bold = flags.contains(Flags::BOLD);
+                    let is_italic = flags.contains(Flags::ITALIC);
+                    let is_dim = flags.contains(Flags::DIM);
+                    let is_hidden = flags.contains(Flags::HIDDEN);
+                    let is_strikeout = flags.contains(Flags::STRIKEOUT);
+
+                    // INVERSE: 前景色と背景色を入れ替え
+                    // BOLD: Named color (0-7) を Bright variant (8-15) に変換
+                    let (mut cell_fg, cell_bg) = if is_inverse {
+                        let fg = if is_bold { bold_color(&cell.bg) } else { color_to_d2d(&cell.bg) };
+                        (fg, color_to_d2d(&cell.fg))
                     } else {
-                        (color_to_d2d(&cell.fg), color_to_d2d(&cell.bg))
+                        let fg = if is_bold { bold_color(&cell.fg) } else { color_to_d2d(&cell.fg) };
+                        (fg, color_to_d2d(&cell.bg))
                     };
+
+                    // DIM: 前景色の輝度を半分にする
+                    if is_dim {
+                        cell_fg = dim_color(&cell_fg);
+                    }
 
                     // セル背景色
                     let has_bg = cell_bg.r != BG_COLOR.r || cell_bg.g != BG_COLOR.g || cell_bg.b != BG_COLOR.b;
@@ -426,12 +519,22 @@ impl Renderer {
                         self.fill_rect(x, y, x + cell_w, y + self.cell_height, bg);
                     }
 
-                    // テキスト
-                    if c != ' ' && c != '\0' {
+                    // HIDDEN: テキストを描画しない
+                    // テキスト描画
+                    if !is_hidden && c != ' ' && c != '\0' {
                         let fg = if is_cursor { BG_COLOR } else { cell_fg };
+
+                        // BOLD/ITALIC に応じた TextFormat を選択
+                        let format = match (is_bold, is_italic) {
+                            (true, true) => &self.bold_italic_text_format,
+                            (true, false) => &self.bold_text_format,
+                            (false, true) => &self.italic_text_format,
+                            (false, false) => &self.text_format,
+                        };
+
                         let text = [c as u16];
                         if let Ok(layout) = self.dwrite_factory.CreateTextLayout(
-                            &text, &self.text_format, cell_w, self.cell_height,
+                            &text, format, cell_w, self.cell_height,
                         ) {
                             if let Some(brush) = self.get_brush(&fg) {
                                 self.rt.DrawTextLayout(
@@ -440,6 +543,25 @@ impl Renderer {
                                 );
                             }
                         }
+                    }
+
+                    // UNDERLINE 各種: セル下部に線を描画
+                    let underline_color = if is_cursor { BG_COLOR } else { cell_fg };
+                    if flags.contains(Flags::UNDERLINE) || flags.contains(Flags::UNDERCURL)
+                        || flags.contains(Flags::DOTTED_UNDERLINE) || flags.contains(Flags::DASHED_UNDERLINE)
+                    {
+                        let line_y = y + self.cell_height - 1.0;
+                        self.fill_rect(x, line_y, x + cell_w, line_y + 1.0, &underline_color);
+                    } else if flags.contains(Flags::DOUBLE_UNDERLINE) {
+                        let line_y = y + self.cell_height - 1.0;
+                        self.fill_rect(x, line_y, x + cell_w, line_y + 1.0, &underline_color);
+                        self.fill_rect(x, line_y - 2.0, x + cell_w, line_y - 1.0, &underline_color);
+                    }
+
+                    // STRIKEOUT: セル中央に取り消し線
+                    if is_strikeout {
+                        let strike_y = y + self.cell_height * 0.5;
+                        self.fill_rect(x, strike_y, x + cell_w, strike_y + 1.0, &underline_color);
                     }
                 }
             }
