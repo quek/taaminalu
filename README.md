@@ -44,18 +44,19 @@ cargo run --release
 
 ### タブ操作
 
-| ショートカット | 動作 |
-|---|---|
-| `Ctrl+Shift+T` | 新規タブ（シェル選択メニュー） |
-| `Ctrl+Shift+W` | アクティブタブを閉じる |
-| `Ctrl+Tab` | 次のタブに切替 |
-| `Ctrl+Shift+Tab` | 前のタブに切替 |
+| ショートカット   | 動作                           |
+|------------------|--------------------------------|
+| `Ctrl+Shift+T`   | 新規タブ（シェル選択メニュー） |
+| `Ctrl+Shift+W`   | アクティブタブを閉じる         |
+| `Ctrl+Tab`       | 次のタブに切替                 |
+| `Ctrl+Shift+Tab` | 前のタブに切替                 |
 
-### 編集
+### マウス操作
 
-| ショートカット | 動作 |
-|---|---|
-| `Ctrl+Shift+V` | クリップボードからペースト |
+| 操作           | 動作                                         |
+|----------------|----------------------------------------------|
+| 左ドラッグ     | テキスト選択 → 離すとクリップボードにコピー |
+| ミドルクリック | クリップボードからペースト                   |
 
 ## アーキテクチャ
 
@@ -72,26 +73,26 @@ ITextStoreACP     Direct2D/DirectWrite
 
 ### モジュール構成
 
-| モジュール | 責務 |
-|---|---|
-| `pty` | ConPTY でシェルプロセスを起動、読み書き |
-| `term` | `alacritty_terminal` のラッパー。グリッドバッファの管理 |
-| `tab` | タブ単位の状態管理（PTY + Term） |
-| `app` | アプリケーション全体の状態、複数タブの管理 |
-| `tsf` | `ITextStoreACP` 実装。グリッドバッファの内容を IME に公開 |
-| `render` | Direct2D + DirectWrite でターミナル描画、タブバー UI |
-| `window` | Win32 ウィンドウ作成・メッセージループ・キー入力処理 |
+| モジュール | 責務                                                      |
+|------------|-----------------------------------------------------------|
+| `pty`      | ConPTY でシェルプロセスを起動、読み書き                   |
+| `term`     | `alacritty_terminal` のラッパー。グリッドバッファの管理   |
+| `tab`      | タブ単位の状態管理（PTY + Term）                          |
+| `app`      | アプリケーション全体の状態、複数タブの管理                |
+| `tsf`      | `ITextStoreACP` 実装。グリッドバッファの内容を IME に公開 |
+| `render`   | Direct2D + DirectWrite でターミナル描画、タブバー UI      |
+| `window`   | Win32 ウィンドウ作成・メッセージループ・キー入力処理      |
 
 ## 技術スタック
 
-| 用途 | 技術 |
-|---|---|
-| 言語 | Rust (Edition 2024) |
-| ConPTY | `windows` crate (`CreatePseudoConsole`) |
-| VT パース + バッファ | `alacritty_terminal` |
-| レンダリング | Direct2D 1.1 + DirectWrite |
-| TSF テキストストア | `ITextStoreACP` (`windows` crate `#[implement]`) |
-| ウィンドウ | Win32 API (`CreateWindowExW`) |
+| 用途                 | 技術                                             |
+|----------------------|--------------------------------------------------|
+| 言語                 | Rust (Edition 2024)                              |
+| ConPTY               | `windows` crate (`CreatePseudoConsole`)          |
+| VT パース + バッファ | `alacritty_terminal`                             |
+| レンダリング         | Direct2D 1.1 + DirectWrite                       |
+| TSF テキストストア   | `ITextStoreACP` (`windows` crate `#[implement]`) |
+| ウィンドウ           | Win32 API (`CreateWindowExW`)                    |
 
 ## ライセンス
 

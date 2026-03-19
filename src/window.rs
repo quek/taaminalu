@@ -410,12 +410,6 @@ unsafe extern "system" fn wnd_proc(
                 return LRESULT(0);
             }
 
-            // Ctrl+Shift+V: ペースト
-            if vk == VK_V && mods.ctrl && mods.shift {
-                paste_from_clipboard(hwnd);
-                return LRESULT(0);
-            }
-
             // 特殊キーのエスケープシーケンス
             if let Some(seq) = build_key_sequence(vk, &mods) {
                 let app = get_app(hwnd);
