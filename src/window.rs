@@ -428,21 +428,26 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_LBUTTONDOWN => {
-            let x = (lparam.0 & 0xFFFF) as i16 as f32;
-            let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as f32;
+            let px = (lparam.0 & 0xFFFF) as i16;
+            let py = ((lparam.0 >> 16) & 0xFFFF) as i16;
             if let Some(app) = get_app(hwnd) {
                 let mut app = app.lock().unwrap();
                 let (_, grid_y) = app.grid_origin();
-                if y < grid_y {
+                if (py as f32) < grid_y {
                     drop(app);
-                    handle_tab_bar_click(hwnd, x, y);
+                    handle_tab_bar_click(hwnd, px as f32, py as f32);
                 } else {
-                    // グリッド領域: 選択開始
-                    let pos = app.screen_to_grid(x, y);
-                    app.selection = Some(Selection { start: pos, end: pos, active: true });
+                    // 既存の選択をクリア
+                    let had_selection = app.selection.is_some();
+                    app.selection = None;
+                    // クリック位置を記憶（ドラッグ開始判定用）
+                    let grid_pos = app.screen_to_grid(px as f32, py as f32);
+                    app.drag_origin = Some((px, py, grid_pos.0, grid_pos.1));
                     drop(app);
                     unsafe { SetCapture(hwnd); }
-                    unsafe { let _ = InvalidateRect(Some(hwnd), None, false); }
+                    if had_selection {
+                        unsafe { let _ = InvalidateRect(Some(hwnd), None, false); }
+                    }
                 }
             }
             LRESULT(0)
@@ -450,15 +455,23 @@ unsafe extern "system" fn wnd_proc(
         WM_MOUSEMOVE => {
             if let Some(app) = get_app(hwnd) {
                 let mut app = app.lock().unwrap();
+                let px = (lparam.0 & 0xFFFF) as i16;
+                let py = ((lparam.0 >> 16) & 0xFFFF) as i16;
+                let pos = app.screen_to_grid(px as f32, py as f32);
                 if app.selection.as_ref().is_some_and(|s| s.active) {
-                    let x = (lparam.0 & 0xFFFF) as i16 as f32;
-                    let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as f32;
-                    let pos = app.screen_to_grid(x, y);
+                    // ドラッグ中: 選択範囲を更新
                     if let Some(ref mut sel) = app.selection {
                         sel.end = pos;
                     }
                     drop(app);
                     unsafe { let _ = InvalidateRect(Some(hwnd), None, false); }
+                } else if let Some((ox, oy, gr, gc)) = app.drag_origin {
+                    // ピクセル単位で少しでも動いたらドラッグ開始
+                    if px != ox || py != oy {
+                        app.selection = Some(Selection { start: (gr, gc), end: pos, active: true });
+                        drop(app);
+                        unsafe { let _ = InvalidateRect(Some(hwnd), None, false); }
+                    }
                 }
             }
             LRESULT(0)
@@ -467,19 +480,21 @@ unsafe extern "system" fn wnd_proc(
             unsafe { let _ = ReleaseCapture(); }
             if let Some(app) = get_app(hwnd) {
                 let mut app = app.lock().unwrap();
-                // 選択範囲のコピー座標を先に取得（借用競合回避）
-                let copy_range = app.selection.as_ref().and_then(|sel| {
-                    if sel.start != sel.end { Some((sel.start, sel.end)) } else { None }
-                });
+                app.drag_origin = None;
+                // 選択範囲があればコピーしてハイライトを残す
+                let copy_range = app.selection.as_ref().map(|sel| (sel.start, sel.end));
                 if let Some((start, end)) = copy_range {
                     let text = app.active().term.selected_text(start, end);
                     if !text.is_empty() {
                         crate::term::set_clipboard_text(&text);
                     }
+                    // ハイライトを残す（次のクリックで消える）
+                    if let Some(ref mut sel) = app.selection {
+                        sel.active = false;
+                    }
+                } else {
+                    app.selection = None;
                 }
-                app.selection = None;
-                drop(app);
-                unsafe { let _ = InvalidateRect(Some(hwnd), None, false); }
             }
             LRESULT(0)
         }

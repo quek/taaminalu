@@ -53,6 +53,8 @@ pub struct App {
     pub active_tab: usize,
     pub renderer: Option<Renderer>,
     pub selection: Option<Selection>,
+    /// マウスボタン押下位置（ピクセル座標 + グリッド座標、ドラッグ開始判定用）
+    pub drag_origin: Option<(i16, i16, usize, usize)>,
 }
 
 impl App {
@@ -63,6 +65,7 @@ impl App {
             active_tab: 0,
             renderer: None,
             selection: None,
+            drag_origin: None,
         })
     }
 
