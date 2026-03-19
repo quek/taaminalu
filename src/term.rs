@@ -1,4 +1,4 @@
-use alacritty_terminal::event::EventListener;
+use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::Flags;
@@ -7,11 +7,47 @@ use alacritty_terminal::term::Term;
 use alacritty_terminal::term::TermMode;
 use alacritty_terminal::vte::ansi::Processor;
 
-/// alacritty_terminal にイベントを通知不要なので空実装
-pub struct VoidListener;
+use windows::Win32::System::DataExchange::{
+    CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
+};
+use windows::Win32::System::Memory::{
+    GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE,
+};
+use windows::Win32::System::Ole::CF_UNICODETEXT;
 
-impl EventListener for VoidListener {
-    fn send_event(&self, _event: alacritty_terminal::event::Event) {}
+/// alacritty_terminal のイベントリスナー
+/// OSC 52 (ClipboardStore) で Windows クリップボードに書き込む
+pub struct TermEventListener;
+
+impl EventListener for TermEventListener {
+    fn send_event(&self, event: Event) {
+        if let Event::ClipboardStore(_, text) = event {
+            set_clipboard_text(&text);
+        }
+    }
+}
+
+/// Windows クリップボードにテキストを書き込む
+fn set_clipboard_text(text: &str) {
+    unsafe {
+        if OpenClipboard(None).is_err() {
+            return;
+        }
+        let _ = EmptyClipboard();
+
+        let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+        let byte_len = wide.len() * 2;
+        let hmem = GlobalAlloc(GMEM_MOVEABLE, byte_len);
+        if let Ok(hmem) = hmem {
+            let ptr = GlobalLock(hmem) as *mut u16;
+            if !ptr.is_null() {
+                std::ptr::copy_nonoverlapping(wide.as_ptr(), ptr, wide.len());
+                let _ = GlobalUnlock(hmem);
+                let _ = SetClipboardData(CF_UNICODETEXT.0 as u32, Some(windows::Win32::Foundation::HANDLE(hmem.0)));
+            }
+        }
+        let _ = CloseClipboard();
+    }
 }
 
 /// ターミナルサイズ
@@ -34,7 +70,7 @@ impl Dimensions for TermSize {
 
 /// alacritty_terminal のラッパー
 pub struct TermWrapper {
-    term: Term<VoidListener>,
+    term: Term<TermEventListener>,
     parser: Processor,
 }
 
@@ -42,7 +78,7 @@ impl TermWrapper {
     pub fn new(cols: usize, rows: usize) -> Self {
         let size = TermSize { cols, rows };
         let config = Config::default();
-        let term = Term::new(config, &size, VoidListener);
+        let term = Term::new(config, &size, TermEventListener);
         Self {
             term,
             parser: Processor::new(),
@@ -203,7 +239,7 @@ impl TermWrapper {
     }
 
     /// 内部 Term への参照（render で Grid にアクセスするため）
-    pub fn inner(&self) -> &Term<VoidListener> {
+    pub fn inner(&self) -> &Term<TermEventListener> {
         &self.term
     }
 
