@@ -3,12 +3,14 @@ use std::collections::HashMap;
 
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D1_COLOR_F, D2D_RECT_F, D2D_SIZE_U,
+    D2D1_COLOR_F, D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_OPEN, D2D_RECT_F, D2D_SIZE_U,
 };
 use windows::Win32::Graphics::Direct2D::{
-    D2D1CreateFactory, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_FACTORY_TYPE_SINGLE_THREADED,
-    D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_PROPERTIES, ID2D1Factory,
-    ID2D1HwndRenderTarget, ID2D1SolidColorBrush,
+    D2D1CreateFactory, D2D1_DASH_STYLE_DASH, D2D1_DASH_STYLE_DOT, D2D1_DRAW_TEXT_OPTIONS_NONE,
+    D2D1_CAP_STYLE_ROUND, D2D1_FACTORY_TYPE_SINGLE_THREADED,
+    D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_QUADRATIC_BEZIER_SEGMENT,
+    D2D1_RENDER_TARGET_PROPERTIES, D2D1_STROKE_STYLE_PROPERTIES, ID2D1Factory,
+    ID2D1HwndRenderTarget, ID2D1SolidColorBrush, ID2D1StrokeStyle,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL,
@@ -178,12 +180,15 @@ pub enum TabBarHitResult {
 
 pub struct Renderer {
     rt: ID2D1HwndRenderTarget,
+    d2d_factory: ID2D1Factory,
     dwrite_factory: IDWriteFactory,
     text_format: IDWriteTextFormat,
     bold_text_format: IDWriteTextFormat,
     italic_text_format: IDWriteTextFormat,
     bold_italic_text_format: IDWriteTextFormat,
     tab_text_format: IDWriteTextFormat,
+    dotted_stroke: ID2D1StrokeStyle,
+    dashed_stroke: ID2D1StrokeStyle,
     pub cell_width: f32,
     pub cell_height: f32,
     brush_cache: RefCell<HashMap<u32, ID2D1SolidColorBrush>>,
@@ -274,12 +279,32 @@ impl Renderer {
             fmt
         };
 
+        let dotted_stroke = unsafe {
+            d2d_factory.CreateStrokeStyle(
+                &D2D1_STROKE_STYLE_PROPERTIES {
+                    dashStyle: D2D1_DASH_STYLE_DOT,
+                    dashCap: D2D1_CAP_STYLE_ROUND,
+                    ..Default::default()
+                },
+                None,
+            )?
+        };
+        let dashed_stroke = unsafe {
+            d2d_factory.CreateStrokeStyle(
+                &D2D1_STROKE_STYLE_PROPERTIES {
+                    dashStyle: D2D1_DASH_STYLE_DASH,
+                    ..Default::default()
+                },
+                None,
+            )?
+        };
+
         let (cell_width, cell_height) = Self::measure_cell(&dwrite_factory, &text_format)?;
 
         Ok(Self {
-            rt, dwrite_factory,
+            rt, d2d_factory, dwrite_factory,
             text_format, bold_text_format, italic_text_format, bold_italic_text_format,
-            tab_text_format, cell_width, cell_height,
+            tab_text_format, dotted_stroke, dashed_stroke, cell_width, cell_height,
             brush_cache: RefCell::new(HashMap::new()),
         })
     }
@@ -556,23 +581,35 @@ impl Renderer {
                         }
                     }
 
+                    // 下線色: cell.underline_color() があれば使用、なければ前景色
+                    let ul_color = if is_cursor {
+                        BG_COLOR
+                    } else if let Some(uc) = cell.underline_color() {
+                        color_to_d2d(&uc)
+                    } else {
+                        cell_fg
+                    };
+
                     // UNDERLINE 各種: セル下部に線を描画
-                    let underline_color = if is_cursor { BG_COLOR } else { cell_fg };
-                    if flags.contains(Flags::UNDERLINE) || flags.contains(Flags::UNDERCURL)
-                        || flags.contains(Flags::DOTTED_UNDERLINE) || flags.contains(Flags::DASHED_UNDERLINE)
-                    {
-                        let line_y = y + self.cell_height - 1.0;
-                        self.fill_rect(x, line_y, x + cell_w, line_y + 1.0, &underline_color);
+                    if flags.contains(Flags::UNDERCURL) {
+                        self.draw_undercurl(x, y + self.cell_height - 2.0, cell_w, &ul_color);
+                    } else if flags.contains(Flags::DOTTED_UNDERLINE) {
+                        self.draw_styled_line(x, y + self.cell_height - 0.5, cell_w, &ul_color, &self.dotted_stroke);
+                    } else if flags.contains(Flags::DASHED_UNDERLINE) {
+                        self.draw_styled_line(x, y + self.cell_height - 0.5, cell_w, &ul_color, &self.dashed_stroke);
                     } else if flags.contains(Flags::DOUBLE_UNDERLINE) {
                         let line_y = y + self.cell_height - 1.0;
-                        self.fill_rect(x, line_y, x + cell_w, line_y + 1.0, &underline_color);
-                        self.fill_rect(x, line_y - 2.0, x + cell_w, line_y - 1.0, &underline_color);
+                        self.fill_rect(x, line_y, x + cell_w, line_y + 1.0, &ul_color);
+                        self.fill_rect(x, line_y - 2.0, x + cell_w, line_y - 1.0, &ul_color);
+                    } else if flags.contains(Flags::UNDERLINE) {
+                        let line_y = y + self.cell_height - 1.0;
+                        self.fill_rect(x, line_y, x + cell_w, line_y + 1.0, &ul_color);
                     }
 
                     // STRIKEOUT: セル中央に取り消し線
                     if is_strikeout {
-                        let strike_y = y + self.cell_height * 0.5;
-                        self.fill_rect(x, strike_y, x + cell_w, strike_y + 1.0, &underline_color);
+                        let strike_color = if is_cursor { BG_COLOR } else { cell_fg };
+                        self.fill_rect(x, y + self.cell_height * 0.5, x + cell_w, y + self.cell_height * 0.5 + 1.0, &strike_color);
                     }
                 }
             }
@@ -594,6 +631,77 @@ impl Renderer {
         let brush = unsafe { self.rt.CreateSolidColorBrush(color, None).ok()? };
         cache.insert(key, brush.clone());
         Some(brush)
+    }
+
+    /// 波線（undercurl）を描画
+    unsafe fn draw_undercurl(&self, x: f32, baseline_y: f32, width: f32, color: &D2D1_COLOR_F) {
+        unsafe {
+            let Some(brush) = self.get_brush(color) else { return };
+            let Ok(geometry) = self.d2d_factory.CreatePathGeometry() else { return };
+            let Ok(sink) = geometry.Open() else { return };
+
+            let amplitude = 2.0f32;
+            let half_period = self.cell_width / 2.0;
+
+            sink.BeginFigure(
+                windows_numerics::Vector2 { X: x, Y: baseline_y },
+                D2D1_FIGURE_BEGIN_HOLLOW,
+            );
+
+            let mut cx = x;
+            let mut going_down = true;
+            while cx < x + width {
+                let next_x = (cx + half_period).min(x + width);
+                let ctrl_y = if going_down {
+                    baseline_y + amplitude
+                } else {
+                    baseline_y - amplitude
+                };
+                sink.AddQuadraticBezier(&D2D1_QUADRATIC_BEZIER_SEGMENT {
+                    point1: windows_numerics::Vector2 {
+                        X: (cx + next_x) / 2.0,
+                        Y: ctrl_y,
+                    },
+                    point2: windows_numerics::Vector2 {
+                        X: next_x,
+                        Y: baseline_y,
+                    },
+                });
+                cx = next_x;
+                going_down = !going_down;
+            }
+
+            sink.EndFigure(D2D1_FIGURE_END_OPEN);
+            let _ = sink.Close();
+
+            self.rt
+                .DrawGeometry(&geometry, &brush, 1.0, None::<&ID2D1StrokeStyle>);
+        }
+    }
+
+    /// スタイル付き線（点線/破線）を描画
+    unsafe fn draw_styled_line(
+        &self,
+        x: f32,
+        y: f32,
+        width: f32,
+        color: &D2D1_COLOR_F,
+        style: &ID2D1StrokeStyle,
+    ) {
+        unsafe {
+            if let Some(brush) = self.get_brush(color) {
+                self.rt.DrawLine(
+                    windows_numerics::Vector2 { X: x, Y: y },
+                    windows_numerics::Vector2 {
+                        X: x + width,
+                        Y: y,
+                    },
+                    &brush,
+                    1.0,
+                    style,
+                );
+            }
+        }
     }
 
     /// 矩形を塗りつぶし

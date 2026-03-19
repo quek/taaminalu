@@ -2,10 +2,10 @@
 
 ## 描画属性
 
-- [ ] UNDERCURL を波線で描画（現在は単線で代用）
-- [ ] DOTTED_UNDERLINE を点線で描画（現在は単線で代用）
-- [ ] DASHED_UNDERLINE を破線で描画（現在は単線で代用）
-- [ ] 下線色（ESC[58;2;R;G;Bm）の対応
+- [x] UNDERCURL を波線で描画（PathGeometry + QuadraticBezier）
+- [x] DOTTED_UNDERLINE を点線で描画（StrokeStyle DOT + DrawLine）
+- [x] DASHED_UNDERLINE を破線で描画（StrokeStyle DASH + DrawLine）
+- [x] 下線色（ESC[58;2;R;G;Bm）の対応（※ConPTY が SGR 58 を除去するため現状未動作）
 
 ## ターミナルモード
 
