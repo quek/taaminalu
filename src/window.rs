@@ -477,15 +477,15 @@ unsafe extern "system" fn wnd_proc(
                 let copy_range = app.selection.as_ref().and_then(|sel| {
                     if sel.start != sel.end { Some((sel.start, sel.end)) } else { None }
                 });
-                if let Some(ref mut sel) = app.selection {
-                    sel.active = false;
-                }
                 if let Some((start, end)) = copy_range {
                     let text = app.active().term.selected_text(start, end);
                     if !text.is_empty() {
                         crate::term::set_clipboard_text(&text);
                     }
                 }
+                app.selection = None;
+                drop(app);
+                unsafe { let _ = InvalidateRect(Some(hwnd), None, false); }
             }
             LRESULT(0)
         }
