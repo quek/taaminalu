@@ -497,11 +497,11 @@ impl Renderer {
 
             for line_idx in 0..lines {
                 let row = &grid[Line(line_idx as i32)];
-                let y = TAB_BAR_HEIGHT + line_idx as f32 * self.cell_height;
+                let y = (TAB_BAR_HEIGHT + line_idx as f32 * self.cell_height).floor();
 
                 for col_idx in 0..cols {
                     let cell = &row[Column(col_idx)];
-                    let x = col_idx as f32 * self.cell_width;
+                    let x = (col_idx as f32 * self.cell_width).floor();
                     let c = cell.c;
                     let is_cursor =
                         cursor_visible && line_idx == cursor_row && col_idx == cursor_col;
@@ -512,7 +512,12 @@ impl Renderer {
                     }
 
                     let is_wide = cell.flags.contains(Flags::WIDE_CHAR);
-                    let cell_w = if is_wide { self.cell_width * 2.0 } else { self.cell_width };
+                    // 隣接セルとのサブピクセル隙間を防ぐため、右端もスナップ
+                    let cell_w = if is_wide {
+                        ((col_idx + 2) as f32 * self.cell_width).floor() - x
+                    } else {
+                        ((col_idx + 1) as f32 * self.cell_width).floor() - x
+                    };
 
                     // セル属性フラグ
                     let flags = cell.flags;
