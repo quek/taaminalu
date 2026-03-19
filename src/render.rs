@@ -194,6 +194,28 @@ pub struct Renderer {
     brush_cache: RefCell<HashMap<u32, ID2D1SolidColorBrush>>,
 }
 
+/// DirectWrite TextFormat を作成するヘルパー
+fn create_text_format(
+    factory: &IDWriteFactory,
+    font: &[u16],
+    locale: &[u16],
+    size: f32,
+    weight: windows::Win32::Graphics::DirectWrite::DWRITE_FONT_WEIGHT,
+    style: windows::Win32::Graphics::DirectWrite::DWRITE_FONT_STYLE,
+) -> windows::core::Result<IDWriteTextFormat> {
+    unsafe {
+        factory.CreateTextFormat(
+            windows::core::PCWSTR(font.as_ptr()),
+            None,
+            weight,
+            style,
+            DWRITE_FONT_STRETCH_NORMAL,
+            size,
+            windows::core::PCWSTR(locale.as_ptr()),
+        )
+    }
+}
+
 impl Renderer {
     pub fn new(hwnd: HWND, width: u32, height: u32) -> windows::core::Result<Self> {
         let d2d_factory: ID2D1Factory =
@@ -213,69 +235,34 @@ impl Renderer {
         let dwrite_factory: IDWriteFactory =
             unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)? };
 
-        let font_name_wide: Vec<u16> = FONT_NAME.encode_utf16().chain(std::iter::once(0)).collect();
+        let font_wide: Vec<u16> = FONT_NAME.encode_utf16().chain(std::iter::once(0)).collect();
         let locale_wide: Vec<u16> = "en-us\0".encode_utf16().collect();
 
-        let text_format = unsafe {
-            dwrite_factory.CreateTextFormat(
-                windows::core::PCWSTR(font_name_wide.as_ptr()),
-                None,
-                DWRITE_FONT_WEIGHT_REGULAR,
-                DWRITE_FONT_STYLE_NORMAL,
-                DWRITE_FONT_STRETCH_NORMAL,
-                FONT_SIZE,
-                windows::core::PCWSTR(locale_wide.as_ptr()),
-            )?
-        };
-
-        let bold_text_format = unsafe {
-            dwrite_factory.CreateTextFormat(
-                windows::core::PCWSTR(font_name_wide.as_ptr()),
-                None,
-                DWRITE_FONT_WEIGHT_BOLD,
-                DWRITE_FONT_STYLE_NORMAL,
-                DWRITE_FONT_STRETCH_NORMAL,
-                FONT_SIZE,
-                windows::core::PCWSTR(locale_wide.as_ptr()),
-            )?
-        };
-
-        let italic_text_format = unsafe {
-            dwrite_factory.CreateTextFormat(
-                windows::core::PCWSTR(font_name_wide.as_ptr()),
-                None,
-                DWRITE_FONT_WEIGHT_REGULAR,
-                DWRITE_FONT_STYLE_ITALIC,
-                DWRITE_FONT_STRETCH_NORMAL,
-                FONT_SIZE,
-                windows::core::PCWSTR(locale_wide.as_ptr()),
-            )?
-        };
-
-        let bold_italic_text_format = unsafe {
-            dwrite_factory.CreateTextFormat(
-                windows::core::PCWSTR(font_name_wide.as_ptr()),
-                None,
-                DWRITE_FONT_WEIGHT_BOLD,
-                DWRITE_FONT_STYLE_ITALIC,
-                DWRITE_FONT_STRETCH_NORMAL,
-                FONT_SIZE,
-                windows::core::PCWSTR(locale_wide.as_ptr()),
-            )?
-        };
-
-        let tab_text_format = unsafe {
-            let fmt = dwrite_factory.CreateTextFormat(
-                windows::core::PCWSTR(font_name_wide.as_ptr()),
-                None,
-                DWRITE_FONT_WEIGHT_REGULAR,
-                DWRITE_FONT_STYLE_NORMAL,
-                DWRITE_FONT_STRETCH_NORMAL,
-                TAB_FONT_SIZE,
-                windows::core::PCWSTR(locale_wide.as_ptr()),
+        let text_format = create_text_format(
+            &dwrite_factory, &font_wide, &locale_wide,
+            FONT_SIZE, DWRITE_FONT_WEIGHT_REGULAR, DWRITE_FONT_STYLE_NORMAL,
+        )?;
+        let bold_text_format = create_text_format(
+            &dwrite_factory, &font_wide, &locale_wide,
+            FONT_SIZE, DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_STYLE_NORMAL,
+        )?;
+        let italic_text_format = create_text_format(
+            &dwrite_factory, &font_wide, &locale_wide,
+            FONT_SIZE, DWRITE_FONT_WEIGHT_REGULAR, DWRITE_FONT_STYLE_ITALIC,
+        )?;
+        let bold_italic_text_format = create_text_format(
+            &dwrite_factory, &font_wide, &locale_wide,
+            FONT_SIZE, DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_STYLE_ITALIC,
+        )?;
+        let tab_text_format = {
+            let fmt = create_text_format(
+                &dwrite_factory, &font_wide, &locale_wide,
+                TAB_FONT_SIZE, DWRITE_FONT_WEIGHT_REGULAR, DWRITE_FONT_STYLE_NORMAL,
             )?;
-            fmt.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
-            fmt.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
+            unsafe {
+                fmt.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
+                fmt.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
+            }
             fmt
         };
 

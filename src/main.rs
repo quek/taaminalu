@@ -1,6 +1,7 @@
 #![windows_subsystem = "windows"]
 
 mod app;
+mod input;
 mod pty;
 mod render;
 mod tab;
