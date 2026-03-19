@@ -60,12 +60,26 @@ fn generate_icon_32x32() -> Vec<[u8; 4]> {
         set(&mut pixels, x, 1, if x < 2 || x >= 30 { border } else { titlebar });
     }
 
-    // タイトルバーのドット (閉じるボタン風)
+    // タイトルバーのボタン (Windows 風: 右寄せ ─ □ ×)
+    let btn: [u8; 4] = [0xCC, 0xCC, 0xCC, 0xFF];
+    let btn_close: [u8; 4] = [0xE7, 0x48, 0x56, 0xFF];
+    // 最小化 ─ (x=18..20, y=3)
     for dx in 0..3 {
-        set(&mut pixels, 3 + dx, 3, [0xE7, 0x48, 0x56, 0xFF]); // 赤
-        set(&mut pixels, 8 + dx, 3, [0xF9, 0xF1, 0xA5, 0xFF]); // 黄
-        set(&mut pixels, 13 + dx, 3, [0x16, 0xC6, 0x0C, 0xFF]); // 緑
+        set(&mut pixels, 18 + dx, 3, btn);
     }
+    // 最大化 □ (x=22..24, y=2..4)
+    for dx in 0..3 {
+        set(&mut pixels, 22 + dx, 2, btn);
+        set(&mut pixels, 22 + dx, 4, btn);
+    }
+    set(&mut pixels, 22, 3, btn);
+    set(&mut pixels, 24, 3, btn);
+    // 閉じる × (x=26..28, y=2..4)
+    set(&mut pixels, 26, 2, btn_close);
+    set(&mut pixels, 28, 2, btn_close);
+    set(&mut pixels, 27, 3, btn_close);
+    set(&mut pixels, 26, 4, btn_close);
+    set(&mut pixels, 28, 4, btn_close);
 
     // ">" プロンプト (row 12-19, col 4-10)
     // >  shape:
