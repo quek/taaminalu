@@ -75,6 +75,7 @@ const fn rgb(r: u8, g: u8, b: u8) -> D2D1_COLOR_F {
 
 const BG_COLOR: D2D1_COLOR_F = rgb(0x0C, 0x0C, 0x0C);
 const CURSOR_COLOR: D2D1_COLOR_F = rgb(0xCC, 0xCC, 0xCC);
+const SELECTION_COLOR: D2D1_COLOR_F = rgb(0x26, 0x4F, 0x78);
 const TAB_BAR_BG: D2D1_COLOR_F = rgb(0x1E, 0x1E, 0x1E);
 const TAB_ACTIVE_BG: D2D1_COLOR_F = rgb(0x0C, 0x0C, 0x0C);
 const TAB_INACTIVE_BG: D2D1_COLOR_F = rgb(0x2D, 0x2D, 0x2D);
@@ -373,6 +374,7 @@ impl Renderer {
         tabs: &[(&str, TabId)],
         active_index: usize,
         preedit: &str,
+        selection: Option<&crate::app::Selection>,
     ) {
         let mut ps = PAINTSTRUCT::default();
         unsafe { let _ = BeginPaint(hwnd, &mut ps); }
@@ -381,7 +383,7 @@ impl Renderer {
             self.rt.BeginDraw();
             self.rt.Clear(Some(&BG_COLOR));
             self.draw_tab_bar(tabs, active_index);
-            self.draw_grid(term);
+            self.draw_grid(term, selection);
             if !preedit.is_empty() {
                 let (cursor_row, cursor_col) = term.cursor_pos();
                 self.draw_preedit(preedit, cursor_row, cursor_col);
@@ -460,7 +462,7 @@ impl Renderer {
         }
     }
 
-    fn draw_grid(&self, term: &TermWrapper) {
+    fn draw_grid(&self, term: &TermWrapper, selection: Option<&crate::app::Selection>) {
         unsafe {
             let grid = term.inner().grid();
             let cols = grid.columns();
@@ -511,11 +513,20 @@ impl Renderer {
                         cell_fg = dim_color(&cell_fg);
                     }
 
+                    // 選択範囲内かチェック
+                    let is_selected = selection.is_some_and(|s| s.contains(line_idx, col_idx));
+
                     // セル背景色
                     let has_bg = cell_bg.r != BG_COLOR.r || cell_bg.g != BG_COLOR.g || cell_bg.b != BG_COLOR.b;
 
-                    if has_bg || is_cursor {
-                        let bg = if is_cursor { &CURSOR_COLOR } else { &cell_bg };
+                    if has_bg || is_cursor || is_selected {
+                        let bg = if is_cursor {
+                            &CURSOR_COLOR
+                        } else if is_selected {
+                            &SELECTION_COLOR
+                        } else {
+                            &cell_bg
+                        };
                         self.fill_rect(x, y, x + cell_w, y + self.cell_height, bg);
                     }
 

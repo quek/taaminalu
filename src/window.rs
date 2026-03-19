@@ -22,7 +22,7 @@ use windows::Win32::UI::Input::Ime::{
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-use crate::app::App;
+use crate::app::{App, Selection};
 use crate::pty::ShellType;
 use crate::render::TabBarHitResult;
 use crate::tab::TabId;
@@ -436,7 +436,61 @@ unsafe extern "system" fn wnd_proc(
         WM_LBUTTONDOWN => {
             let x = (lparam.0 & 0xFFFF) as i16 as f32;
             let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as f32;
-            handle_tab_bar_click(hwnd, x, y);
+            if let Some(app) = get_app(hwnd) {
+                let mut app = app.lock().unwrap();
+                let (_, grid_y) = app.grid_origin();
+                if y < grid_y {
+                    drop(app);
+                    handle_tab_bar_click(hwnd, x, y);
+                } else {
+                    // グリッド領域: 選択開始
+                    let pos = app.screen_to_grid(x, y);
+                    app.selection = Some(Selection { start: pos, end: pos, active: true });
+                    drop(app);
+                    unsafe { SetCapture(hwnd); }
+                    unsafe { let _ = InvalidateRect(Some(hwnd), None, false); }
+                }
+            }
+            LRESULT(0)
+        }
+        WM_MOUSEMOVE => {
+            if let Some(app) = get_app(hwnd) {
+                let mut app = app.lock().unwrap();
+                if app.selection.as_ref().is_some_and(|s| s.active) {
+                    let x = (lparam.0 & 0xFFFF) as i16 as f32;
+                    let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as f32;
+                    let pos = app.screen_to_grid(x, y);
+                    if let Some(ref mut sel) = app.selection {
+                        sel.end = pos;
+                    }
+                    drop(app);
+                    unsafe { let _ = InvalidateRect(Some(hwnd), None, false); }
+                }
+            }
+            LRESULT(0)
+        }
+        WM_LBUTTONUP => {
+            unsafe { let _ = ReleaseCapture(); }
+            if let Some(app) = get_app(hwnd) {
+                let mut app = app.lock().unwrap();
+                // 選択範囲のコピー座標を先に取得（借用競合回避）
+                let copy_range = app.selection.as_ref().and_then(|sel| {
+                    if sel.start != sel.end { Some((sel.start, sel.end)) } else { None }
+                });
+                if let Some(ref mut sel) = app.selection {
+                    sel.active = false;
+                }
+                if let Some((start, end)) = copy_range {
+                    let text = app.active().term.selected_text(start, end);
+                    if !text.is_empty() {
+                        crate::term::set_clipboard_text(&text);
+                    }
+                }
+            }
+            LRESULT(0)
+        }
+        WM_MBUTTONDOWN => {
+            paste_from_clipboard(hwnd);
             LRESULT(0)
         }
         WM_PTY_OUTPUT => {

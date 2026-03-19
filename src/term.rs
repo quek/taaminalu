@@ -28,7 +28,7 @@ impl EventListener for TermEventListener {
 }
 
 /// Windows クリップボードにテキストを書き込む
-fn set_clipboard_text(text: &str) {
+pub fn set_clipboard_text(text: &str) {
     unsafe {
         if OpenClipboard(None).is_err() {
             return;
@@ -90,6 +90,43 @@ impl TermWrapper {
         self.parser.advance(&mut self.term, bytes);
     }
 
+
+    /// 選択範囲のテキストを抽出
+    /// start/end は (row, col) 0-indexed。行末の空白はトリム、行間は \n で連結。
+    pub fn selected_text(&self, start: (usize, usize), end: (usize, usize)) -> String {
+        let grid = self.term.grid();
+        let cols = grid.columns();
+        let lines = grid.screen_lines();
+
+        // start/end を正規化
+        let (start, end) = if start.0 < end.0 || (start.0 == end.0 && start.1 <= end.1) {
+            (start, end)
+        } else {
+            (end, start)
+        };
+
+        let mut result = String::new();
+        for row_idx in start.0..=end.0.min(lines.saturating_sub(1)) {
+            let row = &grid[Line(row_idx as i32)];
+            let col_start = if row_idx == start.0 { start.1 } else { 0 };
+            let col_end = if row_idx == end.0 { end.1 } else { cols.saturating_sub(1) };
+
+            let mut line = String::new();
+            for col in col_start..=col_end.min(cols.saturating_sub(1)) {
+                let cell = &row[Column(col)];
+                if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                    continue;
+                }
+                line.push(cell.c);
+            }
+            let trimmed = line.trim_end();
+            result.push_str(trimmed);
+            if row_idx < end.0 {
+                result.push('\n');
+            }
+        }
+        result
+    }
 
     /// 全画面テキスト取得（wide char spacer をスキップ、行末トリムなし）
     /// 各行は固定長ではなく、spacer スキップ後の実文字 + '\n' で構成

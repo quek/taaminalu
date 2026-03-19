@@ -7,11 +7,52 @@ use crate::pty::ShellType;
 use crate::render::Renderer;
 use crate::tab::{Tab, TabId};
 
+/// マウスドラッグによるテキスト選択状態
+pub struct Selection {
+    /// 選択開始位置 (row, col) 0-indexed
+    pub start: (usize, usize),
+    /// 選択終了位置 (row, col) 0-indexed
+    pub end: (usize, usize),
+    /// ドラッグ中か
+    pub active: bool,
+}
+
+impl Selection {
+    /// 正規化: start が end より前になるよう並べ替え
+    pub fn ordered(&self) -> ((usize, usize), (usize, usize)) {
+        if self.start.0 < self.end.0
+            || (self.start.0 == self.end.0 && self.start.1 <= self.end.1)
+        {
+            (self.start, self.end)
+        } else {
+            (self.end, self.start)
+        }
+    }
+
+    /// セル (row, col) が選択範囲内か
+    pub fn contains(&self, row: usize, col: usize) -> bool {
+        let ((sr, sc), (er, ec)) = self.ordered();
+        if row < sr || row > er {
+            return false;
+        }
+        if sr == er {
+            col >= sc && col <= ec
+        } else if row == sr {
+            col >= sc
+        } else if row == er {
+            col <= ec
+        } else {
+            true
+        }
+    }
+}
+
 /// アプリケーション全体の状態
 pub struct App {
     pub tabs: Vec<Tab>,
     pub active_tab: usize,
     pub renderer: Option<Renderer>,
+    pub selection: Option<Selection>,
 }
 
 impl App {
@@ -21,6 +62,7 @@ impl App {
             tabs: vec![tab],
             active_tab: 0,
             renderer: None,
+            selection: None,
         })
     }
 
@@ -54,7 +96,7 @@ impl App {
             let tab_infos: Vec<(&str, TabId)> = self.tabs.iter()
                 .map(|t| (t.title.as_str(), t.id))
                 .collect();
-            renderer.paint_with_tabs(hwnd, &self.active().term, &tab_infos, self.active_tab, preedit);
+            renderer.paint_with_tabs(hwnd, &self.active().term, &tab_infos, self.active_tab, preedit, self.selection.as_ref());
         }
     }
 
@@ -151,6 +193,16 @@ impl App {
 
     pub fn active_tab_id(&self) -> TabId {
         self.active().id
+    }
+
+    /// 画面座標からグリッド座標に変換
+    pub fn screen_to_grid(&self, x: f32, y: f32) -> (usize, usize) {
+        let (cell_w, cell_h) = self.cell_size();
+        let (_, grid_y) = self.grid_origin();
+        let (cols, rows) = self.grid_size();
+        let row = ((y - grid_y) / cell_h).max(0.0) as usize;
+        let col = (x / cell_w).max(0.0) as usize;
+        (row.min(rows.saturating_sub(1)), col.min(cols.saturating_sub(1)))
     }
 
     pub fn grid_size(&self) -> (usize, usize) {
