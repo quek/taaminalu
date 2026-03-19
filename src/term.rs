@@ -4,6 +4,7 @@ use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::Config;
 use alacritty_terminal::term::Term;
+use alacritty_terminal::term::TermMode;
 use alacritty_terminal::vte::ansi::Processor;
 
 /// alacritty_terminal にイベントを通知不要なので空実装
@@ -52,6 +53,7 @@ impl TermWrapper {
     pub fn process(&mut self, bytes: &[u8]) {
         self.parser.advance(&mut self.term, bytes);
     }
+
 
     /// 全画面テキスト取得（wide char spacer をスキップ、行末トリムなし）
     /// 各行は固定長ではなく、spacer スキップ後の実文字 + '\n' で構成
@@ -134,6 +136,11 @@ impl TermWrapper {
         (point.line.0 as usize, point.column.0)
     }
 
+    /// カーソルが表示状態か（DECTCEM: ESC[?25h/l）
+    pub fn is_cursor_visible(&self) -> bool {
+        self.term.mode().contains(TermMode::SHOW_CURSOR)
+    }
+
     /// カーソル位置の ACP
     /// ACP は文字間の位置（カーソルが N 番目の文字の前にいる = ACP N）
     /// wide char spacer セルの場合のみ本体セルにスナップ
@@ -199,4 +206,5 @@ impl TermWrapper {
     pub fn inner(&self) -> &Term<VoidListener> {
         &self.term
     }
+
 }

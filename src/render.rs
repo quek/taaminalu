@@ -388,6 +388,7 @@ impl Renderer {
             let grid = term.inner().grid();
             let cols = grid.columns();
             let lines = grid.screen_lines();
+            let cursor_visible = term.is_cursor_visible();
             let (cursor_row, cursor_col) = term.cursor_pos();
 
             for line_idx in 0..lines {
@@ -398,7 +399,8 @@ impl Renderer {
                     let cell = &row[Column(col_idx)];
                     let x = col_idx as f32 * self.cell_width;
                     let c = cell.c;
-                    let is_cursor = line_idx == cursor_row && col_idx == cursor_col;
+                    let is_cursor =
+                        cursor_visible && line_idx == cursor_row && col_idx == cursor_col;
 
                     // wide char spacer はスキップ（本体セルで描画済み）
                     if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
@@ -408,8 +410,15 @@ impl Renderer {
                     let is_wide = cell.flags.contains(Flags::WIDE_CHAR);
                     let cell_w = if is_wide { self.cell_width * 2.0 } else { self.cell_width };
 
+                    // INVERSE フラグで前景色と背景色を入れ替え
+                    let is_inverse = cell.flags.contains(Flags::INVERSE);
+                    let (cell_fg, cell_bg) = if is_inverse {
+                        (color_to_d2d(&cell.bg), color_to_d2d(&cell.fg))
+                    } else {
+                        (color_to_d2d(&cell.fg), color_to_d2d(&cell.bg))
+                    };
+
                     // セル背景色
-                    let cell_bg = color_to_d2d(&cell.bg);
                     let has_bg = cell_bg.r != BG_COLOR.r || cell_bg.g != BG_COLOR.g || cell_bg.b != BG_COLOR.b;
 
                     if has_bg || is_cursor {
@@ -419,7 +428,7 @@ impl Renderer {
 
                     // テキスト
                     if c != ' ' && c != '\0' {
-                        let fg = if is_cursor { BG_COLOR } else { color_to_d2d(&cell.fg) };
+                        let fg = if is_cursor { BG_COLOR } else { cell_fg };
                         let text = [c as u16];
                         if let Ok(layout) = self.dwrite_factory.CreateTextLayout(
                             &text, &self.text_format, cell_w, self.cell_height,
