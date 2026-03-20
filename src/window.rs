@@ -3,6 +3,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 use windows::Win32::Foundation::{
@@ -22,7 +23,7 @@ use windows::Win32::UI::Input::Ime::{
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-use crate::app::{App, Selection};
+use crate::app::{App, Selection, SelectionMode};
 use crate::input::{build_key_sequence, get_modifiers};
 use crate::pty::ShellType;
 use crate::render::TabBarHitResult;
@@ -437,15 +438,43 @@ unsafe extern "system" fn wnd_proc(
                     drop(app);
                     handle_tab_bar_click(hwnd, px as f32, py as f32);
                 } else {
-                    // 既存の選択をクリア
                     let had_selection = app.selection.is_some();
-                    app.selection = None;
-                    // クリック位置を記憶（ドラッグ開始判定用）
                     let grid_pos = app.screen_to_grid(px as f32, py as f32);
-                    app.drag_origin = Some((px, py, grid_pos.0, grid_pos.1));
+
+                    // ダブルクリック判定（500ms 以内・同一セル）
+                    let now = Instant::now();
+                    let is_double = app.last_click.take().is_some_and(|(time, r, c)| {
+                        now.duration_since(time).as_millis() < 500
+                            && r == grid_pos.0
+                            && c == grid_pos.1
+                    });
+
+                    if is_double {
+                        // 単語選択
+                        let (sc, ec) = app.active().term.word_boundary(grid_pos.0, grid_pos.1);
+                        let start = (grid_pos.0, sc);
+                        let end = (grid_pos.0, ec);
+                        app.selection = Some(Selection {
+                            start,
+                            end,
+                            active: true,
+                            mode: SelectionMode::Word,
+                            origin_word: Some((start, end)),
+                        });
+                        app.drag_origin = Some((px, py, grid_pos.0, grid_pos.1));
+                        // ダブルクリック後の last_click をクリアして
+                        // 次のクリックが新規になるようにする
+                        app.last_click = None;
+                    } else {
+                        // 通常クリック
+                        app.selection = None;
+                        app.drag_origin = Some((px, py, grid_pos.0, grid_pos.1));
+                        app.last_click = Some((now, grid_pos.0, grid_pos.1));
+                    }
+
                     drop(app);
                     unsafe { SetCapture(hwnd); }
-                    if had_selection {
+                    if had_selection || is_double {
                         unsafe { let _ = InvalidateRect(Some(hwnd), None, false); }
                     }
                 }
@@ -458,17 +487,55 @@ unsafe extern "system" fn wnd_proc(
                 let px = (lparam.0 & 0xFFFF) as i16;
                 let py = ((lparam.0 >> 16) & 0xFFFF) as i16;
                 let pos = app.screen_to_grid(px as f32, py as f32);
+                // Word モードのドラッグ用: 借用の競合を避けるため必要時のみ先に計算
+                let is_word_drag = app.selection.as_ref()
+                    .is_some_and(|s| s.active && s.mode == SelectionMode::Word);
+                let word_at_pos = if is_word_drag {
+                    app.active().term.word_boundary(pos.0, pos.1)
+                } else {
+                    (0, 0)
+                };
                 if app.selection.as_ref().is_some_and(|s| s.active) {
-                    // ドラッグ中: 選択範囲を更新
                     if let Some(ref mut sel) = app.selection {
-                        sel.end = pos;
+                        if sel.mode == SelectionMode::Word {
+                            // Word モード: 単語単位で選択範囲を拡張
+                            let (wsc, wec) = word_at_pos;
+                            if let Some((origin_start, origin_end)) = sel.origin_word {
+                                if pos.0 < origin_start.0
+                                    || (pos.0 == origin_start.0 && wsc < origin_start.1)
+                                {
+                                    // 起点より前方にドラッグ
+                                    sel.start = (pos.0, wsc);
+                                    sel.end = origin_end;
+                                } else if pos.0 > origin_end.0
+                                    || (pos.0 == origin_end.0 && wec > origin_end.1)
+                                {
+                                    // 起点より後方にドラッグ
+                                    sel.start = origin_start;
+                                    sel.end = (pos.0, wec);
+                                } else {
+                                    // 起点単語内
+                                    sel.start = origin_start;
+                                    sel.end = origin_end;
+                                }
+                            }
+                        } else {
+                            // 通常モード: セル単位で更新
+                            sel.end = pos;
+                        }
                     }
                     drop(app);
                     unsafe { let _ = InvalidateRect(Some(hwnd), None, false); }
                 } else if let Some((ox, oy, gr, gc)) = app.drag_origin {
                     // ピクセル単位で少しでも動いたらドラッグ開始
                     if px != ox || py != oy {
-                        app.selection = Some(Selection { start: (gr, gc), end: pos, active: true });
+                        app.selection = Some(Selection {
+                            start: (gr, gc),
+                            end: pos,
+                            active: true,
+                            mode: SelectionMode::Normal,
+                            origin_word: None,
+                        });
                         drop(app);
                         unsafe { let _ = InvalidateRect(Some(hwnd), None, false); }
                     }

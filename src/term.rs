@@ -262,6 +262,65 @@ impl TermWrapper {
         (last_line, cols)
     }
 
+    /// 指定位置の単語の列範囲を返す (start_col, end_col)
+    /// 単語境界文字: WezTerm 準拠 (スペース、タブ、括弧、引用符など)
+    pub fn word_boundary(&self, row: usize, col: usize) -> (usize, usize) {
+        const BOUNDARY: &str = " \t\n{[}]()'\"`,;:|<>";
+
+        let grid = self.term.grid();
+        let cols_count = grid.columns();
+        let lines = grid.screen_lines();
+        if row >= lines || col >= cols_count {
+            return (col, col);
+        }
+
+        let row_data = &grid[Line(row as i32)];
+        let click_cell = &row_data[Column(col)];
+
+        // WIDE_CHAR_SPACER 上をクリックした場合、本体セルにスナップ
+        let col = if click_cell.flags.contains(Flags::WIDE_CHAR_SPACER) && col > 0 {
+            col - 1
+        } else {
+            col
+        };
+        let click_char = row_data[Column(col)].c;
+
+        // クリック位置が境界文字なら、同じ境界文字の連続を選択
+        let is_boundary = BOUNDARY.contains(click_char);
+
+        // 左方向に走査
+        let mut start_col = col;
+        while start_col > 0 {
+            let prev = start_col - 1;
+            let cell = &row_data[Column(prev)];
+            if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                start_col = prev;
+                continue;
+            }
+            if is_boundary != BOUNDARY.contains(cell.c) {
+                break;
+            }
+            start_col = prev;
+        }
+
+        // 右方向に走査
+        let mut end_col = col;
+        while end_col + 1 < cols_count {
+            let next = end_col + 1;
+            let cell = &row_data[Column(next)];
+            if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                end_col = next;
+                continue;
+            }
+            if is_boundary != BOUNDARY.contains(cell.c) {
+                break;
+            }
+            end_col = next;
+        }
+
+        (start_col, end_col)
+    }
+
     /// リサイズ
     pub fn resize(&mut self, cols: usize, rows: usize) {
         self.term.resize(TermSize { cols, rows });

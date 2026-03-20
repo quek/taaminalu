@@ -1,4 +1,5 @@
 use std::io;
+use std::time::Instant;
 
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
@@ -6,6 +7,15 @@ use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
 use crate::pty::ShellType;
 use crate::render::Renderer;
 use crate::tab::{Tab, TabId};
+
+/// 選択モード
+#[derive(Clone, Copy, PartialEq)]
+pub enum SelectionMode {
+    /// 通常のドラッグ選択
+    Normal,
+    /// ダブルクリックによる単語単位選択
+    Word,
+}
 
 /// マウスドラッグによるテキスト選択状態
 pub struct Selection {
@@ -15,6 +25,10 @@ pub struct Selection {
     pub end: (usize, usize),
     /// ドラッグ中か
     pub active: bool,
+    /// 選択モード
+    pub mode: SelectionMode,
+    /// Word モードの起点単語範囲 ((row, start_col), (row, end_col))
+    pub origin_word: Option<((usize, usize), (usize, usize))>,
 }
 
 impl Selection {
@@ -55,6 +69,8 @@ pub struct App {
     pub selection: Option<Selection>,
     /// マウスボタン押下位置（ピクセル座標 + グリッド座標、ドラッグ開始判定用）
     pub drag_origin: Option<(i16, i16, usize, usize)>,
+    /// 直前のクリック情報（ダブルクリック検出用: 時刻, row, col）
+    pub last_click: Option<(Instant, usize, usize)>,
 }
 
 impl App {
@@ -66,6 +82,7 @@ impl App {
             renderer: None,
             selection: None,
             drag_origin: None,
+            last_click: None,
         })
     }
 
