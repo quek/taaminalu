@@ -479,11 +479,12 @@ impl Renderer {
             let grid = term.inner().grid();
             let cols = grid.columns();
             let lines = grid.screen_lines();
-            let cursor_visible = term.is_cursor_visible();
+            let display_offset = grid.display_offset() as i32;
+            let cursor_visible = term.is_cursor_visible() && display_offset == 0;
             let (cursor_row, cursor_col) = term.cursor_pos();
 
             for line_idx in 0..lines {
-                let row = &grid[Line(line_idx as i32)];
+                let row = &grid[Line(line_idx as i32 - display_offset)];
                 let y = (TAB_BAR_HEIGHT + line_idx as f32 * self.cell_height).floor();
 
                 for col_idx in 0..cols {
@@ -531,7 +532,7 @@ impl Renderer {
                     }
 
                     // 選択範囲内かチェック
-                    let is_selected = selection.is_some_and(|s| s.contains(line_idx, col_idx));
+                    let is_selected = selection.is_some_and(|s| s.contains_at(line_idx, col_idx, display_offset as usize));
 
                     // セル背景色
                     let has_bg = cell_bg.r != BG_COLOR.r || cell_bg.g != BG_COLOR.g || cell_bg.b != BG_COLOR.b;

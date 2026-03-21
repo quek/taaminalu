@@ -440,6 +440,7 @@ unsafe extern "system" fn wnd_proc(
                 } else {
                     let had_selection = app.selection.is_some();
                     let grid_pos = app.screen_to_grid(px as f32, py as f32);
+                    let current_offset = app.active().term.display_offset();
 
                     // ダブルクリック判定（500ms 以内・同一セル）
                     let now = Instant::now();
@@ -460,7 +461,7 @@ unsafe extern "system" fn wnd_proc(
                             active: true,
                             mode: SelectionMode::Word,
                             origin_word: Some((start, end)),
-                            display_offset: 0,
+                            display_offset: current_offset,
                         });
                         app.drag_origin = Some((px, py, grid_pos.0, grid_pos.1));
                         // ダブルクリック後の last_click をクリアして
@@ -488,6 +489,7 @@ unsafe extern "system" fn wnd_proc(
                 let px = (lparam.0 & 0xFFFF) as i16;
                 let py = ((lparam.0 >> 16) & 0xFFFF) as i16;
                 let pos = app.screen_to_grid(px as f32, py as f32);
+                let current_offset = app.active().term.display_offset();
                 // Word モードのドラッグ用: 借用の競合を避けるため必要時のみ先に計算
                 let is_word_drag = app.selection.as_ref()
                     .is_some_and(|s| s.active && s.mode == SelectionMode::Word);
@@ -536,7 +538,7 @@ unsafe extern "system" fn wnd_proc(
                             active: true,
                             mode: SelectionMode::Normal,
                             origin_word: None,
-                            display_offset: 0,
+                            display_offset: current_offset,
                         });
                         drop(app);
                         unsafe { let _ = InvalidateRect(Some(hwnd), None, false); }
@@ -594,8 +596,6 @@ unsafe extern "system" fn wnd_proc(
                         let _ = tab.write_pty(&keys);
                     } else {
                         tab.term.scroll_display(alacritty_terminal::grid::Scroll::Delta(lines));
-                        let screen_lines = tab.term.screen_lines();
-                        crate::app::adjust_selection_after_scroll(&mut app.selection, lines, screen_lines);
                         drop(app);
                         repaint(hwnd);
                     }
