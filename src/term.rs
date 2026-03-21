@@ -1,5 +1,5 @@
 use alacritty_terminal::event::{Event, EventListener};
-use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::Config;
@@ -339,4 +339,77 @@ impl TermWrapper {
         &self.term
     }
 
+    /// スクロールバック表示を移動
+    pub fn scroll_display(&mut self, _scroll: Scroll) {
+        // スタブ: 何もしない
+    }
+
+    /// 現在の表示オフセット（0 = 最下部、値が大きいほど履歴方向）
+    pub fn display_offset(&self) -> usize {
+        0
+    }
+
+    /// ALT_SCREEN モードかどうか
+    pub fn is_alt_screen(&self) -> bool {
+        false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 画面行数を超える行を送り込んでスクロールバック履歴を作る
+    fn fill_history(term: &mut TermWrapper, extra_lines: usize) {
+        let total = term.screen_lines() + extra_lines;
+        for i in 0..total {
+            let line = format!("line {i}\r\n");
+            term.process(line.as_bytes());
+        }
+    }
+
+    #[test]
+    fn test_初期状態のdisplay_offsetは0() {
+        let term = TermWrapper::new(80, 24);
+        assert_eq!(term.display_offset(), 0);
+    }
+
+    #[test]
+    fn test_履歴がある状態で上スクロールするとdisplay_offsetが増加() {
+        let mut term = TermWrapper::new(80, 24);
+        fill_history(&mut term, 50);
+
+        term.scroll_display(Scroll::Delta(3));
+        assert!(term.display_offset() > 0, "上スクロール後に display_offset > 0 であるべき");
+    }
+
+    #[test]
+    fn test_スクロール後に下スクロールするとdisplay_offsetが減少() {
+        let mut term = TermWrapper::new(80, 24);
+        fill_history(&mut term, 50);
+
+        // まず上にスクロール
+        term.scroll_display(Scroll::Delta(10));
+        let offset_after_up = term.display_offset();
+
+        // 下にスクロール
+        term.scroll_display(Scroll::Delta(-3));
+        assert!(term.display_offset() < offset_after_up, "下スクロール後に display_offset が減少するべき");
+    }
+
+    #[test]
+    fn test_最下部でさらに下スクロールしても0のまま() {
+        let mut term = TermWrapper::new(80, 24);
+        fill_history(&mut term, 50);
+
+        // 最下部（初期状態）でさらに下へ
+        term.scroll_display(Scroll::Delta(-10));
+        assert_eq!(term.display_offset(), 0, "最下部でさらに下スクロールしても 0 のまま");
+    }
+
+    #[test]
+    fn test_is_alt_screenのデフォルトはfalse() {
+        let term = TermWrapper::new(80, 24);
+        assert!(!term.is_alt_screen());
+    }
 }
