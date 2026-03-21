@@ -569,6 +569,36 @@ unsafe extern "system" fn wnd_proc(
             paste_from_clipboard(hwnd);
             LRESULT(0)
         }
+        WM_MOUSEWHEEL => {
+            let delta = (wparam.0 >> 16) as i16;
+            // システム設定からノッチあたりのスクロール行数を取得
+            let mut lines_per_notch: u32 = 3;
+            unsafe {
+                let _ = SystemParametersInfoW(
+                    SPI_GETWHEELSCROLLLINES,
+                    0,
+                    Some(&mut lines_per_notch as *mut u32 as *mut _),
+                    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+                );
+            }
+            let lines = calc_scroll_lines(delta, lines_per_notch);
+            if lines != 0 {
+                if let Some(app) = get_app(hwnd) {
+                    let mut app = app.lock().unwrap();
+                    let idx = app.active_tab;
+                    let tab = &mut app.tabs[idx];
+                    if tab.term.is_alt_screen() {
+                        let keys = alt_screen_arrow_keys(lines);
+                        let _ = tab.write_pty(&keys);
+                    } else {
+                        tab.term.scroll_display(alacritty_terminal::grid::Scroll::Delta(lines));
+                        drop(app);
+                        repaint(hwnd);
+                    }
+                }
+            }
+            LRESULT(0)
+        }
         WM_PTY_OUTPUT => {
             let tab_id = wparam.0 as TabId;
             // アクティブタブの出力なら再描画 + TSF通知
