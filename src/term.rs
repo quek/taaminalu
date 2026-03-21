@@ -97,6 +97,7 @@ impl TermWrapper {
         let grid = self.term.grid();
         let cols = grid.columns();
         let lines = grid.screen_lines();
+        let display_offset = grid.display_offset() as i32;
 
         // start/end を正規化
         let (start, end) = if start.0 < end.0 || (start.0 == end.0 && start.1 <= end.1) {
@@ -107,7 +108,7 @@ impl TermWrapper {
 
         let mut result = String::new();
         for row_idx in start.0..=end.0.min(lines.saturating_sub(1)) {
-            let row = &grid[Line(row_idx as i32)];
+            let row = &grid[Line(row_idx as i32 - display_offset)];
             let col_start = if row_idx == start.0 { start.1 } else { 0 };
             let col_end = if row_idx == end.0 { end.1 } else { cols.saturating_sub(1) };
 
@@ -274,7 +275,8 @@ impl TermWrapper {
             return (col, col);
         }
 
-        let row_data = &grid[Line(row as i32)];
+        let display_offset = grid.display_offset() as i32;
+        let row_data = &grid[Line(row as i32 - display_offset)];
         let click_cell = &row_data[Column(col)];
 
         // WIDE_CHAR_SPACER 上をクリックした場合、本体セルにスナップ
