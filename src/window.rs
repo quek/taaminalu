@@ -827,15 +827,33 @@ fn paste_from_clipboard(hwnd: HWND) {
 /// delta: WM_MOUSEWHEEL の上位ワード（正=上、負=下）
 /// lines_per_notch: 1ノッチ (WHEEL_DELTA=120) あたりのスクロール行数
 /// 戻り値: スクロール行数（正=上、負=下）。半ノッチ以下でも最低1行。
-pub fn calc_scroll_lines(_delta: i16, _lines_per_notch: u32) -> i32 {
-    0
+pub fn calc_scroll_lines(delta: i16, lines_per_notch: u32) -> i32 {
+    const WHEEL_DELTA: i32 = 120;
+    let raw = (delta as i32) * (lines_per_notch as i32) / WHEEL_DELTA;
+    if raw == 0 {
+        // 半ノッチ等の小さなデルタでも最低1行は返す
+        if delta > 0 { 1 } else if delta < 0 { -1 } else { 0 }
+    } else {
+        raw
+    }
 }
 
 /// ALT_SCREEN 時に送信する矢印キーシーケンスを生成
 /// lines > 0: 上矢印 (ESC[A) を lines 回
 /// lines < 0: 下矢印 (ESC[B) を |lines| 回
-pub fn alt_screen_arrow_keys(_lines: i32) -> Vec<u8> {
-    Vec::new()
+pub fn alt_screen_arrow_keys(lines: i32) -> Vec<u8> {
+    let (seq, count) = if lines > 0 {
+        (b"\x1b[A", lines as usize)
+    } else if lines < 0 {
+        (b"\x1b[B", lines.unsigned_abs() as usize)
+    } else {
+        return Vec::new();
+    };
+    let mut result = Vec::with_capacity(seq.len() * count);
+    for _ in 0..count {
+        result.extend_from_slice(seq);
+    }
+    result
 }
 
 #[cfg(test)]
