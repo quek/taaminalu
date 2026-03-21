@@ -592,6 +592,8 @@ unsafe extern "system" fn wnd_proc(
                         let _ = tab.write_pty(&keys);
                     } else {
                         tab.term.scroll_display(alacritty_terminal::grid::Scroll::Delta(lines));
+                        let screen_lines = tab.term.screen_lines();
+                        crate::app::adjust_selection_after_scroll(&mut app.selection, lines, screen_lines);
                         drop(app);
                         repaint(hwnd);
                     }
