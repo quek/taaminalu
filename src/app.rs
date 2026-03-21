@@ -81,7 +81,12 @@ impl Selection {
 }
 
 /// スクロール後に選択範囲を調整。画面外に出たら None にする。
-pub fn adjust_selection_after_scroll(_selection: &mut Option<Selection>, _delta: i32, _screen_lines: usize) {
+pub fn adjust_selection_after_scroll(selection: &mut Option<Selection>, delta: i32, screen_lines: usize) {
+    if let Some(sel) = selection {
+        if !sel.adjust_for_scroll(delta, screen_lines) {
+            *selection = None;
+        }
+    }
 }
 
 /// アプリケーション全体の状態
@@ -318,14 +323,14 @@ mod tests {
     }
 
     #[test]
-    fn test_選択ありスクロールで画面外になったらNone() {
+    fn test_選択ありスクロールで画面外になったら消える() {
         let mut sel = Some(make_selection((20, 0), (22, 5)));
         adjust_selection_after_scroll(&mut sel, 5, 24);
         assert!(sel.is_none(), "画面外に出たら None になるべき");
     }
 
     #[test]
-    fn test_選択なしスクロールでもNoneのまま() {
+    fn test_選択なしスクロールでも変化なし() {
         let mut sel: Option<Selection> = None;
         adjust_selection_after_scroll(&mut sel, 3, 24);
         assert!(sel.is_none());
