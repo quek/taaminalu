@@ -412,4 +412,44 @@ mod tests {
         let term = TermWrapper::new(80, 24);
         assert!(!term.is_alt_screen());
     }
+
+    #[test]
+    fn test_スクロールバック時にselected_textがビューポート相対で正しいテキストを返す() {
+        let mut term = TermWrapper::new(80, 24);
+        // "line 0" ~ "line 73" を書き込む（24行画面 + 50行の履歴）
+        fill_history(&mut term, 50);
+        // 最下部の表示は "line 50" ~ "line 73"
+
+        // 10行上にスクロール → ビューポート先頭は "line 40" になるはず
+        term.scroll_display(Scroll::Delta(10));
+        assert_eq!(term.display_offset(), 10);
+
+        // ビューポート row=0 の先頭数文字を選択
+        let text = term.selected_text((0, 0), (0, 6));
+        assert!(
+            text.starts_with("line 4"),
+            "スクロールバック時 row=0 は 'line 4x' であるべきだが実際は: '{text}'"
+        );
+    }
+
+    #[test]
+    fn test_スクロールバック時にword_boundaryがビューポート相対で正しい境界を返す() {
+        let mut term = TermWrapper::new(80, 24);
+        // 履歴行: "hello world N" (50行)
+        for i in 0..50 {
+            term.process(format!("hello world {i}\r\n").as_bytes());
+        }
+        // 画面行: "hi there N" (24行)
+        for i in 0..24 {
+            term.process(format!("hi there {i}\r\n").as_bytes());
+        }
+
+        // display_offset=0: row=0 は "hi there X" → word_boundary(0,0) = (0, 1) "hi"
+        // 10行上にスクロール → row=0 は "hello world X" → word_boundary(0,0) = (0, 4) "hello"
+        term.scroll_display(Scroll::Delta(10));
+
+        let (start, end) = term.word_boundary(0, 0);
+        assert_eq!(start, 0, "単語の開始列");
+        assert_eq!(end, 4, "'hello' の終了列 (0-indexed) であるべき");
+    }
 }
