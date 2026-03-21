@@ -47,7 +47,18 @@ impl Selection {
     /// delta > 0: 上スクロール（コンテンツが画面下方向に移動 → row 増加）
     /// delta < 0: 下スクロール（コンテンツが画面上方向に移動 → row 減少）
     /// 選択範囲が完全に画面外に出た場合は false を返す
-    pub fn adjust_for_scroll(&mut self, _delta: i32, _screen_lines: usize) -> bool {
+    pub fn adjust_for_scroll(&mut self, delta: i32, screen_lines: usize) -> bool {
+        let new_start = self.start.0 as i32 + delta;
+        let new_end = self.end.0 as i32 + delta;
+
+        // 両方とも画面外なら不可視
+        let max_line = screen_lines as i32 - 1;
+        if (new_start > max_line && new_end > max_line) || (new_start < 0 && new_end < 0) {
+            return false;
+        }
+
+        self.start.0 = new_start.max(0) as usize;
+        self.end.0 = new_end.max(0) as usize;
         true
     }
 
