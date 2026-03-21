@@ -16,29 +16,63 @@ use windows::Win32::System::Threading::{
     STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ShellType {
-    Wsl,
+    Wsl { distro: Option<String> },
     Cmd,
     PowerShell,
 }
 
 impl ShellType {
-    pub fn label(&self) -> &'static str {
+    pub fn label(&self) -> String {
         match self {
-            ShellType::Wsl => "WSL",
-            ShellType::Cmd => "CMD",
-            ShellType::PowerShell => "PowerShell",
+            ShellType::Wsl { distro: Some(d) } => format!("WSL ({d})"),
+            ShellType::Wsl { distro: None } => "WSL".to_string(),
+            ShellType::Cmd => "CMD".to_string(),
+            ShellType::PowerShell => "PowerShell".to_string(),
         }
     }
 
-    fn command(&self) -> &'static str {
+    fn command(&self) -> String {
         match self {
-            ShellType::Wsl => "wsl.exe\0",
-            ShellType::Cmd => "cmd.exe\0",
-            ShellType::PowerShell => "powershell.exe\0",
+            ShellType::Wsl { distro: Some(d) } => format!("wsl.exe -d {d}\0"),
+            ShellType::Wsl { distro: None } => "wsl.exe\0".to_string(),
+            ShellType::Cmd => "cmd.exe\0".to_string(),
+            ShellType::PowerShell => "powershell.exe\0".to_string(),
         }
     }
+}
+
+/// インストール済み WSL ディストリビューション一覧を取得する
+pub fn get_wsl_distros() -> Vec<String> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    let output = std::process::Command::new("wsl.exe")
+        .args(["-l", "-q"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+
+    let output = match output {
+        Ok(o) if o.status.success() => o,
+        _ => return vec![],
+    };
+
+    // wsl.exe は UTF-16LE で出力する
+    let stdout = &output.stdout;
+    if stdout.len() % 2 != 0 {
+        return vec![];
+    }
+    let wide: Vec<u16> = stdout
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect();
+    let text = String::from_utf16_lossy(&wide);
+    text.lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .map(|l| l.to_string())
+        .collect()
 }
 
 pub struct Pty {
@@ -65,11 +99,11 @@ fn dup_handle(src: HANDLE) -> io::Result<HANDLE> {
 }
 
 impl Pty {
-    pub fn new(cols: u16, rows: u16, shell: ShellType) -> io::Result<Self> {
+    pub fn new(cols: u16, rows: u16, shell: &ShellType) -> io::Result<Self> {
         unsafe { Self::create(cols, rows, shell) }
     }
 
-    unsafe fn create(cols: u16, rows: u16, shell: ShellType) -> io::Result<Self> {
+    unsafe fn create(cols: u16, rows: u16, shell: &ShellType) -> io::Result<Self> {
         let size = COORD {
             X: cols.min(i16::MAX as u16) as i16,
             Y: rows.min(i16::MAX as u16) as i16,

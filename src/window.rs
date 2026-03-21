@@ -25,7 +25,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::app::{App, Selection, SelectionMode};
 use crate::input::{build_key_sequence, get_modifiers};
-use crate::pty::ShellType;
+use crate::pty::{ShellType, get_wsl_distros};
 use crate::render::TabBarHitResult;
 use crate::tab::TabId;
 use crate::tsf::TsfContext;
@@ -80,9 +80,11 @@ pub const WM_PTY_OUTPUT: u32 = WM_USER + 1;
 pub const WM_TAB_CLOSED: u32 = WM_USER + 2;
 
 // シェル選択メニュー ID
-const MENU_ID_WSL: u32 = 1;
+const MENU_ID_WSL_DEFAULT: u32 = 1;
 const MENU_ID_CMD: u32 = 2;
 const MENU_ID_POWERSHELL: u32 = 3;
+// WSL ディストリ用 ID: 100 + index
+const MENU_ID_WSL_DISTRO_BASE: u32 = 100;
 
 /// HWND ごとの TSF コンテキスト
 static TSF_CONTEXTS: OnceLock<Mutex<HashMap<isize, TsfContext>>> = OnceLock::new();
@@ -171,7 +173,8 @@ pub fn create_window(app: Arc<Mutex<App>>) -> windows::core::Result<HWND> {
         let hicon = LoadIconW(
             Some(windows::Win32::Foundation::HINSTANCE(hinstance.0)),
             windows::core::PCWSTR(std::ptr::dangling::<u16>()),
-        )?;
+        )
+        .unwrap_or_default();
 
         let wc = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
@@ -703,17 +706,38 @@ fn handle_tab_bar_click(hwnd: HWND, x: f32, y: f32) {
 
 fn show_new_tab_menu(hwnd: HWND) {
     unsafe {
-        let menu = CreatePopupMenu();
-        let menu = match menu {
+        let menu = match CreatePopupMenu() {
             Ok(m) => m,
             Err(_) => return,
         };
 
-        let wsl_text: Vec<u16> = "WSL\0".encode_utf16().collect();
+        // WSL ディストリ一覧を取得してサブメニュー化
+        let distros = get_wsl_distros();
+        if distros.is_empty() {
+            // ディストリ取得できなかった場合はデフォルト WSL 1項目
+            let wsl_text: Vec<u16> = "WSL\0".encode_utf16().collect();
+            let _ = AppendMenuW(menu, MF_STRING, MENU_ID_WSL_DEFAULT as usize, windows::core::PCWSTR(wsl_text.as_ptr()));
+        } else {
+            let wsl_sub = match CreatePopupMenu() {
+                Ok(m) => m,
+                Err(_) => return,
+            };
+            // デフォルト WSL（ディストリ指定なし）
+            let default_text: Vec<u16> = "デフォルト\0".encode_utf16().collect();
+            let _ = AppendMenuW(wsl_sub, MF_STRING, MENU_ID_WSL_DEFAULT as usize, windows::core::PCWSTR(default_text.as_ptr()));
+            let _ = AppendMenuW(wsl_sub, MF_SEPARATOR, 0, None);
+            // 各ディストリ
+            for (i, distro) in distros.iter().enumerate() {
+                let text: Vec<u16> = format!("{distro}\0").encode_utf16().collect();
+                let id = MENU_ID_WSL_DISTRO_BASE.saturating_add(i as u32);
+                let _ = AppendMenuW(wsl_sub, MF_STRING, id as usize, windows::core::PCWSTR(text.as_ptr()));
+            }
+            let wsl_text: Vec<u16> = "WSL\0".encode_utf16().collect();
+            let _ = AppendMenuW(menu, MF_POPUP, wsl_sub.0 as usize, windows::core::PCWSTR(wsl_text.as_ptr()));
+        }
+
         let cmd_text: Vec<u16> = "CMD\0".encode_utf16().collect();
         let ps_text: Vec<u16> = "PowerShell\0".encode_utf16().collect();
-
-        let _ = AppendMenuW(menu, MF_STRING, MENU_ID_WSL as usize, windows::core::PCWSTR(wsl_text.as_ptr()));
         let _ = AppendMenuW(menu, MF_STRING, MENU_ID_CMD as usize, windows::core::PCWSTR(cmd_text.as_ptr()));
         let _ = AppendMenuW(menu, MF_STRING, MENU_ID_POWERSHELL as usize, windows::core::PCWSTR(ps_text.as_ptr()));
 
@@ -735,9 +759,16 @@ fn show_new_tab_menu(hwnd: HWND) {
         if result.as_bool() {
             let selected = result.0 as u32;
             let shell = match selected {
-                MENU_ID_WSL => ShellType::Wsl,
+                MENU_ID_WSL_DEFAULT => ShellType::Wsl { distro: None },
                 MENU_ID_CMD => ShellType::Cmd,
                 MENU_ID_POWERSHELL => ShellType::PowerShell,
+                id if id >= MENU_ID_WSL_DISTRO_BASE => {
+                    let idx = (id - MENU_ID_WSL_DISTRO_BASE) as usize;
+                    match distros.get(idx) {
+                        Some(name) => ShellType::Wsl { distro: Some(name.clone()) },
+                        None => return,
+                    }
+                }
                 _ => return,
             };
             create_new_tab(hwnd, shell);

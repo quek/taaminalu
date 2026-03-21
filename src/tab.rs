@@ -24,14 +24,15 @@ pub struct Tab {
 
 impl Tab {
     pub fn new(cols: usize, rows: usize, shell: ShellType) -> io::Result<Self> {
-        let pty = Pty::new(cols as u16, rows as u16, shell)?;
+        let pty = Pty::new(cols as u16, rows as u16, &shell)?;
         let term = TermWrapper::new(cols, rows);
+        let title = shell.label();
         Ok(Self {
             id: next_tab_id(),
             pty,
             term,
             shell_type: shell,
-            title: shell.label().to_string(),
+            title,
         })
     }
 
