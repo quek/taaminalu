@@ -19,9 +19,9 @@ pub enum SelectionMode {
 
 /// マウスドラッグによるテキスト選択状態
 pub struct Selection {
-    /// 選択開始位置 (row, col) 0-indexed
+    /// 選択開始位置 (row, col) 0-indexed（作成時のビューポート座標）
     pub start: (usize, usize),
-    /// 選択終了位置 (row, col) 0-indexed
+    /// 選択終了位置 (row, col) 0-indexed（作成時のビューポート座標）
     pub end: (usize, usize),
     /// ドラッグ中か
     pub active: bool,
@@ -29,6 +29,8 @@ pub struct Selection {
     pub mode: SelectionMode,
     /// Word モードの起点単語範囲 ((row, start_col), (row, end_col))
     pub origin_word: Option<((usize, usize), (usize, usize))>,
+    /// 選択作成時の display_offset
+    pub display_offset: usize,
 }
 
 impl Selection {
@@ -60,6 +62,11 @@ impl Selection {
         self.start.0 = new_start.max(0) as usize;
         self.end.0 = new_end.max(0) as usize;
         true
+    }
+
+    /// セル (row, col) が現在の display_offset で選択範囲内か
+    pub fn contains_at(&self, _row: usize, _col: usize, _current_display_offset: usize) -> bool {
+        false
     }
 
     /// セル (row, col) が選択範囲内か
@@ -271,6 +278,18 @@ mod tests {
             active: false,
             mode: SelectionMode::Normal,
             origin_word: None,
+            display_offset: 0,
+        }
+    }
+
+    fn make_selection_at_offset(start: (usize, usize), end: (usize, usize), display_offset: usize) -> Selection {
+        Selection {
+            start,
+            end,
+            active: false,
+            mode: SelectionMode::Normal,
+            origin_word: None,
+            display_offset,
         }
     }
 
@@ -334,5 +353,45 @@ mod tests {
         let mut sel: Option<Selection> = None;
         adjust_selection_after_scroll(&mut sel, 3, 24);
         assert!(sel.is_none());
+    }
+
+    // --- contains_at ---
+
+    #[test]
+    fn test_同じオフセットならcontainsと同じ結果() {
+        // 選択: row 5-7, col 0-10, display_offset=0
+        let sel = make_selection((5, 0), (7, 10));
+        assert!(sel.contains_at(6, 5, 0), "選択範囲内");
+        assert!(!sel.contains_at(4, 5, 0), "選択範囲外");
+    }
+
+    #[test]
+    fn test_上スクロール後に選択が画面下方向にずれる() {
+        // 選択: row 5-7 を display_offset=0 で作成
+        // 現在 display_offset=3 → コンテンツは画面下方向に3行ずれる
+        // 元の row 5 は今 row 8 に表示される
+        let sel = make_selection_at_offset((5, 0), (7, 10), 0);
+        assert!(sel.contains_at(8, 5, 3), "row 8 は元の row 5 の内容");
+        assert!(!sel.contains_at(5, 5, 3), "row 5 はもう選択範囲外");
+    }
+
+    #[test]
+    fn test_下スクロール後に選択が画面上方向にずれる() {
+        // 選択: row 8-10 を display_offset=5 で作成
+        // 現在 display_offset=2 → 3行分上にずれる
+        // 元の row 8 は今 row 5 に表示される
+        let sel = make_selection_at_offset((8, 0), (10, 10), 5);
+        assert!(sel.contains_at(5, 5, 2), "row 5 は元の row 8 の内容");
+        assert!(!sel.contains_at(8, 5, 2), "row 8 はもう選択範囲外");
+    }
+
+    #[test]
+    fn test_選択が画面外ならfalse() {
+        // 選択: row 2-4 を display_offset=0 で作成
+        // 現在 display_offset=10 → 元の row 2 は row 12 に表示される
+        // 画面24行なので表示されるが、逆に display_offset=0 で作った選択が
+        // offset=10 のとき row 0 は元の row -10 → 範囲外
+        let sel = make_selection_at_offset((2, 0), (4, 10), 0);
+        assert!(!sel.contains_at(0, 5, 10), "row 0 は選択範囲外");
     }
 }

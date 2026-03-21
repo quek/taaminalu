@@ -460,6 +460,7 @@ unsafe extern "system" fn wnd_proc(
                             active: true,
                             mode: SelectionMode::Word,
                             origin_word: Some((start, end)),
+                            display_offset: 0,
                         });
                         app.drag_origin = Some((px, py, grid_pos.0, grid_pos.1));
                         // ダブルクリック後の last_click をクリアして
@@ -535,6 +536,7 @@ unsafe extern "system" fn wnd_proc(
                             active: true,
                             mode: SelectionMode::Normal,
                             origin_word: None,
+                            display_offset: 0,
                         });
                         drop(app);
                         unsafe { let _ = InvalidateRect(Some(hwnd), None, false); }
