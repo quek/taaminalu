@@ -172,7 +172,7 @@ pub fn create_window(app: Arc<Mutex<App>>) -> windows::core::Result<HWND> {
 
         let hicon = LoadIconW(
             Some(windows::Win32::Foundation::HINSTANCE(hinstance.0)),
-            windows::core::PCWSTR(std::ptr::dangling::<u16>()),
+            windows::core::PCWSTR(1 as *const u16), // MAKEINTRESOURCE(1)
         )
         .unwrap_or_default();
 
