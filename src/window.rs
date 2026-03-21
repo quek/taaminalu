@@ -454,16 +454,17 @@ unsafe extern "system" fn wnd_proc(
 
                     if is_double {
                         // 単語選択
+                        let history = app.active().term.history_size();
                         let (sc, ec) = app.active().term.word_boundary(grid_pos.0, grid_pos.1);
-                        let start = (grid_pos.0, sc);
-                        let end = (grid_pos.0, ec);
+                        let stable_row = grid_pos.0 + history - current_offset;
+                        let start = (stable_row, sc);
+                        let end = (stable_row, ec);
                         app.selection = Some(Selection {
                             start,
                             end,
                             active: true,
                             mode: SelectionMode::Word,
                             origin_word: Some((start, end)),
-                            display_offset: current_offset,
                         });
                         app.drag_origin = Some((px, py, grid_pos.0, grid_pos.1));
                         // ダブルクリック後の last_click をクリアして
@@ -492,6 +493,7 @@ unsafe extern "system" fn wnd_proc(
                 let py = ((lparam.0 >> 16) & 0xFFFF) as i16;
                 let pos = app.screen_to_grid(px as f32, py as f32);
                 let current_offset = app.active().term.display_offset();
+                let history = app.active().term.history_size();
                 // Word モードのドラッグ用: 借用の競合を避けるため必要時のみ先に計算
                 let is_word_drag = app.selection.as_ref()
                     .is_some_and(|s| s.active && s.mode == SelectionMode::Word);
@@ -501,23 +503,24 @@ unsafe extern "system" fn wnd_proc(
                     (0, 0)
                 };
                 if app.selection.as_ref().is_some_and(|s| s.active) {
+                    let stable_pos_row = pos.0 + history - current_offset;
                     if let Some(ref mut sel) = app.selection {
                         if sel.mode == SelectionMode::Word {
                             // Word モード: 単語単位で選択範囲を拡張
                             let (wsc, wec) = word_at_pos;
                             if let Some((origin_start, origin_end)) = sel.origin_word {
-                                if pos.0 < origin_start.0
-                                    || (pos.0 == origin_start.0 && wsc < origin_start.1)
+                                if stable_pos_row < origin_start.0
+                                    || (stable_pos_row == origin_start.0 && wsc < origin_start.1)
                                 {
                                     // 起点より前方にドラッグ
-                                    sel.start = (pos.0, wsc);
+                                    sel.start = (stable_pos_row, wsc);
                                     sel.end = origin_end;
-                                } else if pos.0 > origin_end.0
-                                    || (pos.0 == origin_end.0 && wec > origin_end.1)
+                                } else if stable_pos_row > origin_end.0
+                                    || (stable_pos_row == origin_end.0 && wec > origin_end.1)
                                 {
                                     // 起点より後方にドラッグ
                                     sel.start = origin_start;
-                                    sel.end = (pos.0, wec);
+                                    sel.end = (stable_pos_row, wec);
                                 } else {
                                     // 起点単語内
                                     sel.start = origin_start;
@@ -526,7 +529,7 @@ unsafe extern "system" fn wnd_proc(
                             }
                         } else {
                             // 通常モード: セル単位で更新
-                            sel.end = pos;
+                            sel.end = (stable_pos_row, pos.1);
                         }
                     }
                     drop(app);
@@ -534,13 +537,15 @@ unsafe extern "system" fn wnd_proc(
                 } else if let Some((ox, oy, gr, gc)) = app.drag_origin {
                     // ピクセル単位で少しでも動いたらドラッグ開始
                     if px != ox || py != oy {
+                        let history = app.active().term.history_size();
+                        let stable_start = (gr + history - current_offset, gc);
+                        let stable_end = (pos.0 + history - current_offset, pos.1);
                         app.selection = Some(Selection {
-                            start: (gr, gc),
-                            end: pos,
+                            start: stable_start,
+                            end: stable_end,
                             active: true,
                             mode: SelectionMode::Normal,
                             origin_word: None,
-                            display_offset: current_offset,
                         });
                         drop(app);
                         unsafe { let _ = InvalidateRect(Some(hwnd), None, false); }

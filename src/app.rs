@@ -18,19 +18,22 @@ pub enum SelectionMode {
 }
 
 /// マウスドラッグによるテキスト選択状態
+///
+/// 行座標は stable_row（スクロールバック先頭を 0 とする絶対行番号）で保持する。
+/// stable_row = viewport_row + history_size - display_offset
+/// これにより、ホイールスクロール（display_offset 変化）と出力スクロール
+/// （history_size 増加）の両方で選択がコンテンツに追従する。
 pub struct Selection {
-    /// 選択開始位置 (row, col) 0-indexed（作成時のビューポート座標）
+    /// 選択開始位置 (stable_row, col) 0-indexed
     pub start: (usize, usize),
-    /// 選択終了位置 (row, col) 0-indexed（作成時のビューポート座標）
+    /// 選択終了位置 (stable_row, col) 0-indexed
     pub end: (usize, usize),
     /// ドラッグ中か
     pub active: bool,
     /// 選択モード
     pub mode: SelectionMode,
-    /// Word モードの起点単語範囲 ((row, start_col), (row, end_col))
+    /// Word モードの起点単語範囲 ((stable_row, start_col), (stable_row, end_col))
     pub origin_word: Option<((usize, usize), (usize, usize))>,
-    /// 選択作成時の display_offset
-    pub display_offset: usize,
 }
 
 impl Selection {
@@ -45,17 +48,14 @@ impl Selection {
         }
     }
 
-    /// セル (row, col) が現在の display_offset で選択範囲内か
-    /// ビューポート row を選択作成時の座標系に変換して判定する
-    pub fn contains_at(&self, row: usize, col: usize, current_display_offset: usize) -> bool {
-        let sel_row = row as i32 - current_display_offset as i32 + self.display_offset as i32;
-        if sel_row < 0 {
-            return false;
-        }
-        self.contains(sel_row as usize, col)
+    /// ビューポート座標 (viewport_row, col) が選択範囲内か判定する。
+    /// history_size と display_offset からビューポート行を stable_row に変換して比較。
+    pub fn viewport_contains(&self, viewport_row: usize, col: usize, history_size: usize, display_offset: usize) -> bool {
+        let stable_row = viewport_row + history_size - display_offset;
+        self.contains(stable_row, col)
     }
 
-    /// セル (row, col) が選択範囲内か
+    /// セル (row, col) が選択範囲内か（stable_row 座標）
     pub fn contains(&self, row: usize, col: usize) -> bool {
         let ((sr, sc), (er, ec)) = self.ordered();
         if row < sr || row > er {
@@ -259,58 +259,44 @@ mod tests {
             active: false,
             mode: SelectionMode::Normal,
             origin_word: None,
-            display_offset: 0,
         }
     }
 
-    fn make_selection_at_offset(start: (usize, usize), end: (usize, usize), display_offset: usize) -> Selection {
-        Selection {
-            start,
-            end,
-            active: false,
-            mode: SelectionMode::Normal,
-            origin_word: None,
-            display_offset,
-        }
-    }
-
-    // --- contains_at ---
+    // --- viewport_contains ---
 
     #[test]
-    fn test_同じオフセットならcontainsと同じ結果() {
-        // 選択: row 5-7, col 0-10, display_offset=0
+    fn test_履歴なしでビューポート行がそのままstable_rowになる() {
+        // history_size=0, display_offset=0 → stable_row = viewport_row
         let sel = make_selection((5, 0), (7, 10));
-        assert!(sel.contains_at(6, 5, 0), "選択範囲内");
-        assert!(!sel.contains_at(4, 5, 0), "選択範囲外");
+        assert!(sel.viewport_contains(6, 5, 0, 0), "選択範囲内");
+        assert!(!sel.viewport_contains(4, 5, 0, 0), "選択範囲外");
     }
 
     #[test]
-    fn test_上スクロール後に選択が画面下方向にずれる() {
-        // 選択: row 5-7 を display_offset=0 で作成
-        // 現在 display_offset=3 → コンテンツは画面下方向に3行ずれる
-        // 元の row 5 は今 row 8 に表示される
-        let sel = make_selection_at_offset((5, 0), (7, 10), 0);
-        assert!(sel.contains_at(8, 5, 3), "row 8 は元の row 5 の内容");
-        assert!(!sel.contains_at(5, 5, 3), "row 5 はもう選択範囲外");
+    fn test_ホイールスクロールで選択がコンテンツに追従する() {
+        // history_size=50 で、display_offset=0 のときに画面 row 5-7 を選択
+        // stable_row = 5 + 50 - 0 = 55, 57
+        let sel = make_selection((55, 0), (57, 10));
+        // display_offset=3 で上スクロール → viewport row 8 の stable_row = 8 + 50 - 3 = 55
+        assert!(sel.viewport_contains(8, 5, 50, 3), "row 8 は stable_row 55 の内容");
+        assert!(!sel.viewport_contains(5, 5, 50, 3), "row 5 は stable_row 52 で範囲外");
     }
 
     #[test]
-    fn test_下スクロール後に選択が画面上方向にずれる() {
-        // 選択: row 8-10 を display_offset=5 で作成
-        // 現在 display_offset=2 → 3行分上にずれる
-        // 元の row 8 は今 row 5 に表示される
-        let sel = make_selection_at_offset((8, 0), (10, 10), 5);
-        assert!(sel.contains_at(5, 5, 2), "row 5 は元の row 8 の内容");
-        assert!(!sel.contains_at(8, 5, 2), "row 8 はもう選択範囲外");
+    fn test_出力スクロールで選択がコンテンツに追従する() {
+        // history_size=50 で画面 row 5 を選択 → stable_row = 55
+        let sel = make_selection((55, 0), (57, 10));
+        // 新しい出力で history_size が 53 に増加（3行スクロール）、display_offset=0
+        // 元の stable_row 55 のコンテンツはビューポート row 2 に移動: 2 + 53 - 0 = 55
+        assert!(sel.viewport_contains(2, 5, 53, 0), "3行出力後、row 2 が stable_row 55");
+        assert!(!sel.viewport_contains(5, 5, 53, 0), "row 5 は stable_row 58 で範囲外");
     }
 
     #[test]
     fn test_選択が画面外ならfalse() {
-        // 選択: row 2-4 を display_offset=0 で作成
-        // 現在 display_offset=10 → 元の row 2 は row 12 に表示される
-        // 画面24行なので表示されるが、逆に display_offset=0 で作った選択が
-        // offset=10 のとき row 0 は元の row -10 → 範囲外
-        let sel = make_selection_at_offset((2, 0), (4, 10), 0);
-        assert!(!sel.contains_at(0, 5, 10), "row 0 は選択範囲外");
+        // stable_row 55-57 の選択、history_size=100, display_offset=0
+        // viewport_row 55 → stable_row = 55 + 100 = 155 ≠ 55
+        let sel = make_selection((55, 0), (57, 10));
+        assert!(!sel.viewport_contains(55, 5, 100, 0), "stable_row が一致しないので範囲外");
     }
 }

@@ -92,12 +92,12 @@ impl TermWrapper {
 
 
     /// 選択範囲のテキストを抽出
-    /// start/end は (row, col) 0-indexed。行末の空白はトリム、行間は \n で連結。
+    /// start/end は (stable_row, col) 0-indexed。stable_row はスクロールバック先頭からの絶対行番号。
+    /// 行末の空白はトリム、行間は \n で連結。
     pub fn selected_text(&self, start: (usize, usize), end: (usize, usize)) -> String {
         let grid = self.term.grid();
         let cols = grid.columns();
-        let lines = grid.screen_lines();
-        let display_offset = grid.display_offset() as i32;
+        let history_size = grid.total_lines().saturating_sub(grid.screen_lines());
 
         // start/end を正規化
         let (start, end) = if start.0 < end.0 || (start.0 == end.0 && start.1 <= end.1) {
@@ -107,10 +107,12 @@ impl TermWrapper {
         };
 
         let mut result = String::new();
-        for row_idx in start.0..=end.0.min(lines.saturating_sub(1)) {
-            let row = &grid[Line(row_idx as i32 - display_offset)];
-            let col_start = if row_idx == start.0 { start.1 } else { 0 };
-            let col_end = if row_idx == end.0 { end.1 } else { cols.saturating_sub(1) };
+        for stable_row in start.0..=end.0 {
+            // stable_row → Line index: Line(stable_row as i32 - history_size as i32)
+            let line_idx = stable_row as i32 - history_size as i32;
+            let row = &grid[Line(line_idx)];
+            let col_start = if stable_row == start.0 { start.1 } else { 0 };
+            let col_end = if stable_row == end.0 { end.1 } else { cols.saturating_sub(1) };
 
             let mut line = String::new();
             for col in col_start..=col_end.min(cols.saturating_sub(1)) {
@@ -122,7 +124,7 @@ impl TermWrapper {
             }
             let trimmed = line.trim_end();
             result.push_str(trimmed);
-            if row_idx < end.0 {
+            if stable_row < end.0 {
                 result.push('\n');
             }
         }
@@ -351,6 +353,11 @@ impl TermWrapper {
         self.term.grid().display_offset()
     }
 
+    /// スクロールバック履歴の行数
+    pub fn history_size(&self) -> usize {
+        self.term.grid().total_lines().saturating_sub(self.term.grid().screen_lines())
+    }
+
     /// ALT_SCREEN モードかどうか
     pub fn is_alt_screen(&self) -> bool {
         self.term.mode().contains(TermMode::ALT_SCREEN)
@@ -454,21 +461,18 @@ mod tests {
     }
 
     #[test]
-    fn test_スクロールバック時にselected_textがビューポート相対で正しいテキストを返す() {
+    fn test_selected_textがstable_rowで正しいテキストを返す() {
         let mut term = TermWrapper::new(80, 24);
         // "line 0" ~ "line 73" を書き込む（24行画面 + 50行の履歴）
         fill_history(&mut term, 50);
-        // 最下部の表示は "line 50" ~ "line 73"
+        let history = term.history_size();
+        // history_size=50, "line 0" は stable_row=0, "line 40" は stable_row=40
 
-        // 10行上にスクロール → ビューポート先頭は "line 40" になるはず
-        term.scroll_display(Scroll::Delta(10));
-        assert_eq!(term.display_offset(), 10);
-
-        // ビューポート row=0 の先頭数文字を選択
-        let text = term.selected_text((0, 0), (0, 6));
+        // stable_row=40 の先頭数文字を選択
+        let text = term.selected_text((40, 0), (40, 6));
         assert!(
             text.starts_with("line 4"),
-            "スクロールバック時 row=0 は 'line 4x' であるべきだが実際は: '{text}'"
+            "stable_row=40 は 'line 4x' であるべきだが実際は: '{text}' (history_size={history})"
         );
     }
 

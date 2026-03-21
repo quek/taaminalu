@@ -480,6 +480,7 @@ impl Renderer {
             let cols = grid.columns();
             let lines = grid.screen_lines();
             let display_offset = grid.display_offset() as i32;
+            let history_size = grid.total_lines().saturating_sub(grid.screen_lines());
             let cursor_visible = term.is_cursor_visible() && display_offset == 0;
             let (cursor_row, cursor_col) = term.cursor_pos();
 
@@ -532,7 +533,7 @@ impl Renderer {
                     }
 
                     // 選択範囲内かチェック
-                    let is_selected = selection.is_some_and(|s| s.contains_at(line_idx, col_idx, display_offset as usize));
+                    let is_selected = selection.is_some_and(|s| s.viewport_contains(line_idx, col_idx, history_size, display_offset as usize));
 
                     // セル背景色
                     let has_bg = cell_bg.r != BG_COLOR.r || cell_bg.g != BG_COLOR.g || cell_bg.b != BG_COLOR.b;
