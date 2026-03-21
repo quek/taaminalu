@@ -358,7 +358,7 @@ impl TermWrapper {
 
     /// スクロールバックを解除して最下部に戻る
     pub fn scroll_to_bottom(&mut self) {
-        // スタブ: 何もしない（Red フェーズ）
+        self.term.scroll_display(Scroll::Bottom);
     }
 }
 
