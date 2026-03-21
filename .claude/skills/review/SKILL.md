@@ -42,7 +42,8 @@ git diff --name-only HEAD
 | 整数キャスト | `as i32`, `as u16`, `as usize` | `saturating_add/sub`、`try_from`、範囲チェック |
 | 外部入力のバッファ | クリップボード、PTY、IME からのデータ | サイズ上限の検証 |
 | Mutex `.unwrap()` | panic でロック毒殺の連鎖 | クリティカルパスでは `unwrap_or_else` を検討 |
-| ハンドル/ポインタの寿命 | スレッド間での HWND/HANDLE 共有 | 所有権モデルの確認 |
+| ハンドル/ポインタの寿命 | スレッド間での HWND/HANDLE 共有                      | 所有権モデルの確認                     |
+| エラーの握りつぶし       | `?` → `unwrap_or_default()` / `ok()` / `unwrap_or()` | 根本原因を調査し、原因そのものを修正する |
 
 ### 4. 問題の修正
 
