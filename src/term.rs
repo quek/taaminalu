@@ -355,6 +355,11 @@ impl TermWrapper {
     pub fn is_alt_screen(&self) -> bool {
         self.term.mode().contains(TermMode::ALT_SCREEN)
     }
+
+    /// スクロールバックを解除して最下部に戻る
+    pub fn scroll_to_bottom(&mut self) {
+        // スタブ: 何もしない（Red フェーズ）
+    }
 }
 
 #[cfg(test)]
@@ -413,6 +418,39 @@ mod tests {
     fn test_is_alt_screenのデフォルトはfalse() {
         let term = TermWrapper::new(80, 24);
         assert!(!term.is_alt_screen());
+    }
+
+    // --- scroll_to_bottom ---
+
+    #[test]
+    fn test_スクロールバック中にscroll_to_bottomでオフセットが0になる() {
+        let mut term = TermWrapper::new(80, 24);
+        fill_history(&mut term, 50);
+
+        // スクロールバック中
+        term.scroll_display(Scroll::Delta(10));
+        assert!(term.display_offset() > 0, "前提: スクロールバック中");
+
+        // Act
+        term.scroll_to_bottom();
+
+        // Assert
+        assert_eq!(term.display_offset(), 0, "scroll_to_bottom 後は最下部に戻るべき");
+    }
+
+    #[test]
+    fn test_最下部でscroll_to_bottomしても0のまま() {
+        let mut term = TermWrapper::new(80, 24);
+        fill_history(&mut term, 50);
+
+        // 最下部（display_offset = 0）
+        assert_eq!(term.display_offset(), 0, "前提: 最下部");
+
+        // Act
+        term.scroll_to_bottom();
+
+        // Assert
+        assert_eq!(term.display_offset(), 0, "最下部のまま");
     }
 
     #[test]
