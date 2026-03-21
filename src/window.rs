@@ -822,3 +822,80 @@ fn paste_from_clipboard(hwnd: HWND) {
         let _ = CloseClipboard();
     }
 }
+
+/// ホイールデルタからスクロール行数を計算
+/// delta: WM_MOUSEWHEEL の上位ワード（正=上、負=下）
+/// lines_per_notch: 1ノッチ (WHEEL_DELTA=120) あたりのスクロール行数
+/// 戻り値: スクロール行数（正=上、負=下）。半ノッチ以下でも最低1行。
+pub fn calc_scroll_lines(_delta: i16, _lines_per_notch: u32) -> i32 {
+    0
+}
+
+/// ALT_SCREEN 時に送信する矢印キーシーケンスを生成
+/// lines > 0: 上矢印 (ESC[A) を lines 回
+/// lines < 0: 下矢印 (ESC[B) を |lines| 回
+pub fn alt_screen_arrow_keys(_lines: i32) -> Vec<u8> {
+    Vec::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- calc_scroll_lines ---
+
+    #[test]
+    fn test_1ノッチ上スクロールで3行() {
+        assert_eq!(calc_scroll_lines(120, 3), 3);
+    }
+
+    #[test]
+    fn test_1ノッチ下スクロールでマイナス3行() {
+        assert_eq!(calc_scroll_lines(-120, 3), -3);
+    }
+
+    #[test]
+    fn test_2ノッチ上スクロールで6行() {
+        assert_eq!(calc_scroll_lines(240, 3), 6);
+    }
+
+    #[test]
+    fn test_半ノッチでも最低1行() {
+        // 高精度ホイール: delta=60 (WHEEL_DELTA の半分)
+        let result = calc_scroll_lines(60, 3);
+        assert!(result >= 1, "半ノッチでも最低1行スクロールすべき: got {result}");
+    }
+
+    #[test]
+    fn test_半ノッチ下スクロールでも最低マイナス1行() {
+        let result = calc_scroll_lines(-60, 3);
+        assert!(result <= -1, "半ノッチ下スクロールでも最低-1行すべき: got {result}");
+    }
+
+    #[test]
+    fn test_lines_per_notchが5のとき() {
+        assert_eq!(calc_scroll_lines(120, 5), 5);
+    }
+
+    // --- alt_screen_arrow_keys ---
+
+    #[test]
+    fn test_上矢印キー3回() {
+        let keys = alt_screen_arrow_keys(3);
+        // ESC[A = [0x1b, 0x5b, 0x41] × 3
+        assert_eq!(keys, b"\x1b[A\x1b[A\x1b[A");
+    }
+
+    #[test]
+    fn test_下矢印キー2回() {
+        let keys = alt_screen_arrow_keys(-2);
+        // ESC[B = [0x1b, 0x5b, 0x42] × 2
+        assert_eq!(keys, b"\x1b[B\x1b[B");
+    }
+
+    #[test]
+    fn test_0行なら空() {
+        let keys = alt_screen_arrow_keys(0);
+        assert!(keys.is_empty());
+    }
+}
