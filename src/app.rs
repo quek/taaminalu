@@ -65,8 +65,13 @@ impl Selection {
     }
 
     /// セル (row, col) が現在の display_offset で選択範囲内か
-    pub fn contains_at(&self, _row: usize, _col: usize, _current_display_offset: usize) -> bool {
-        false
+    /// ビューポート row を選択作成時の座標系に変換して判定する
+    pub fn contains_at(&self, row: usize, col: usize, current_display_offset: usize) -> bool {
+        let sel_row = row as i32 - current_display_offset as i32 + self.display_offset as i32;
+        if sel_row < 0 {
+            return false;
+        }
+        self.contains(sel_row as usize, col)
     }
 
     /// セル (row, col) が選択範囲内か
