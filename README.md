@@ -6,7 +6,7 @@ TSF 対応ターミナルエミュレータ for Windows
 
 **taaminalu** は、TSF (Text Services Framework) の `ITextStoreACP` を実装し、ターミナルバッファの内容を IME に公開するターミナルエミュレータです。
 
-既存のターミナルアプリ（Windows Terminal, Alacritty 等）は TSF テキストストアの読み取りに対応しておらず、`GetText` が空を返します。そのため、カーソル位置の文字を読み取る IME 機能（[rtry](https://github.com/jmkgit/rtry) のストロークヘルプ等）が動作しません。
+既存のターミナルアプリ（Windows Terminal, Alacritty 等）は TSF テキストストアの読み取りに対応しておらず、`GetText` が空を返します。そのため、カーソル位置の文字を読み取る IME 機能（[rtry](https://github.com/quek/rtry) のストロークヘルプ等）が動作しません。
 
 taaminalu は IME が `GetText` でターミナルバッファの内容を読み取れるようにします。
 
