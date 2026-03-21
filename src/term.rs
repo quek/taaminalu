@@ -340,18 +340,18 @@ impl TermWrapper {
     }
 
     /// スクロールバック表示を移動
-    pub fn scroll_display(&mut self, _scroll: Scroll) {
-        // スタブ: 何もしない
+    pub fn scroll_display(&mut self, scroll: Scroll) {
+        self.term.scroll_display(scroll);
     }
 
     /// 現在の表示オフセット（0 = 最下部、値が大きいほど履歴方向）
     pub fn display_offset(&self) -> usize {
-        0
+        self.term.grid().display_offset()
     }
 
     /// ALT_SCREEN モードかどうか
     pub fn is_alt_screen(&self) -> bool {
-        false
+        self.term.mode().contains(TermMode::ALT_SCREEN)
     }
 }
 
