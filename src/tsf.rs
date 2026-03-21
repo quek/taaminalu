@@ -351,7 +351,7 @@ impl ITextStoreACP_Impl for TextStore_Impl {
         // composition 中は preedit 末尾が挿入点
         let insert_acp = base_acp.saturating_add(preedit_len);
 
-        if dwflags & TF_IAS_QUERYONLY.0 as u32 != 0 {
+        if dwflags & TF_IAS_QUERYONLY.0 != 0 {
             unsafe {
                 if !pacpstart.is_null() { *pacpstart = insert_acp; }
                 if !pacpend.is_null() { *pacpend = insert_acp; }
@@ -583,6 +583,7 @@ pub fn setup_tsf(
     let client_id = unsafe { thread_mgr.Activate()? };
     let doc_mgr = unsafe { thread_mgr.CreateDocumentMgr()? };
 
+    #[allow(clippy::arc_with_non_send_sync)] // COM オブジェクトは Send/Sync ではないが Arc<Mutex> で保護
     let shared_sink = Arc::new(Mutex::new(SharedSink { sink: None, mask: 0 }));
     let composition = Arc::new(Mutex::new(CompositionState::new()));
     let text_store = TextStore::new(

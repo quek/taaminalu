@@ -706,6 +706,7 @@ impl Renderer {
     }
 
     /// テキストを描画
+    #[allow(clippy::too_many_arguments)]
     unsafe fn draw_text(&self, text: &str, format: &IDWriteTextFormat, x: f32, y: f32, width: f32, height: f32, color: &D2D1_COLOR_F) {
         unsafe {
             let wide: Vec<u16> = text.encode_utf16().collect();

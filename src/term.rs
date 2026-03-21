@@ -90,7 +90,6 @@ impl TermWrapper {
         self.parser.advance(&mut self.term, bytes);
     }
 
-
     /// 選択範囲のテキストを抽出
     /// start/end は (stable_row, col) 0-indexed。stable_row はスクロールバック先頭からの絶対行番号。
     /// 行末の空白はトリム、行間は \n で連結。

@@ -57,7 +57,7 @@ fn generate_icon_32x32() -> Vec<[u8; 4]> {
         set(&mut pixels, x, 0, border);
     }
     for x in 1..31 {
-        set(&mut pixels, x, 1, if x < 2 || x >= 30 { border } else { titlebar });
+        set(&mut pixels, x, 1, if !(2..30).contains(&x) { border } else { titlebar });
     }
 
     // タイトルバーのボタン (Windows 風: 右寄せ ─ □ ×)
@@ -100,7 +100,7 @@ fn generate_icon_32x32() -> Vec<[u8; 4]> {
     for &(px, py) in &gt_pixels {
         set(&mut pixels, px, py, prompt);
         // ミラーで下半分
-        if py > 14 || py == 14 {
+        if py >= 14 {
             continue;
         }
         let mirror_y = 14 + (14 - py);
@@ -135,7 +135,7 @@ fn generate_icon_32x32() -> Vec<[u8; 4]> {
 
 fn build_ico(pixels: &[[u8; 4]], width: u32, height: u32) -> Vec<u8> {
     let pixel_count = (width * height) as usize;
-    let and_mask_row = ((width + 31) / 32 * 4) as usize;
+    let and_mask_row = (width.div_ceil(32) * 4) as usize;
     let and_mask_size = and_mask_row * height as usize;
     let bmp_size = 40 + pixel_count * 4 + and_mask_size;
 
@@ -181,9 +181,7 @@ fn build_ico(pixels: &[[u8; 4]], width: u32, height: u32) -> Vec<u8> {
     }
 
     // AND mask (all 0 for 32-bit alpha)
-    for _ in 0..and_mask_size {
-        data.push(0);
-    }
+    data.extend(std::iter::repeat_n(0u8, and_mask_size));
 
     data
 }

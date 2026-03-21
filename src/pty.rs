@@ -59,7 +59,7 @@ fn dup_handle(src: HANDLE) -> io::Result<HANDLE> {
     unsafe {
         let process = GetCurrentProcess();
         DuplicateHandle(process, src, process, &mut dup, 0, false, DUPLICATE_SAME_ACCESS)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            .map_err(io::Error::other)?;
     }
     Ok(dup)
 }
@@ -71,8 +71,8 @@ impl Pty {
 
     unsafe fn create(cols: u16, rows: u16, shell: ShellType) -> io::Result<Self> {
         let size = COORD {
-            X: cols as i16,
-            Y: rows as i16,
+            X: cols.min(i16::MAX as u16) as i16,
+            Y: rows.min(i16::MAX as u16) as i16,
         };
 
         // ConPTY 入力パイプ: input_read → ConPTY が読む, input_write → 我々が書く
@@ -90,14 +90,14 @@ impl Pty {
 
         unsafe {
             CreatePipe(&mut input_read, &mut input_write, Some(&sa), 0)
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+                .map_err(io::Error::other)?;
             CreatePipe(&mut output_read, &mut output_write, Some(&sa), 0)
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+                .map_err(io::Error::other)?;
         }
 
         // ConPTY 作成
         let hpc = unsafe { CreatePseudoConsole(size, input_read, output_write, 0) }
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            .map_err(io::Error::other)?;
 
         // ConPTY に渡したパイプ端はもう不要
         unsafe {
@@ -116,7 +116,7 @@ impl Pty {
 
         unsafe {
             InitializeProcThreadAttributeList(Some(attr_list), 1, None, &mut attr_size)
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+                .map_err(io::Error::other)?;
 
             UpdateProcThreadAttribute(
                 attr_list,
@@ -127,7 +127,7 @@ impl Pty {
                 None,
                 None,
             )
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            .map_err(io::Error::other)?;
         }
 
         // STARTF_USESTDHANDLES + null ハンドルで親のコンソール継承を防ぐ
@@ -156,7 +156,7 @@ impl Pty {
                 &si.StartupInfo,
                 &mut pi,
             )
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            .map_err(io::Error::other)?;
 
             DeleteProcThreadAttributeList(attr_list);
         }
@@ -176,7 +176,7 @@ impl Pty {
         let mut bytes_written = 0u32;
         unsafe {
             WriteFile(self.input_write, Some(data), Some(&mut bytes_written), None)
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+                .map_err(io::Error::other)?;
         }
         Ok(bytes_written as usize)
     }
@@ -194,12 +194,12 @@ impl Pty {
     /// ターミナルサイズ変更
     pub fn resize(&self, cols: u16, rows: u16) -> io::Result<()> {
         let size = COORD {
-            X: cols as i16,
-            Y: rows as i16,
+            X: cols.min(i16::MAX as u16) as i16,
+            Y: rows.min(i16::MAX as u16) as i16,
         };
         unsafe {
             ResizePseudoConsole(self.hpc, size)
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+                .map_err(io::Error::other)?;
         }
         Ok(())
     }
