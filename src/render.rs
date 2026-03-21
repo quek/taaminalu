@@ -427,13 +427,12 @@ impl Renderer {
             let wide: Vec<u16> = preedit.encode_utf16().collect();
             if let Ok(layout) = self.dwrite_factory.CreateTextLayout(
                 &wide, &self.text_format, preedit_pixel_width, self.cell_height,
-            ) {
-                if let Some(brush) = self.get_brush(&fg) {
+            )
+                && let Some(brush) = self.get_brush(&fg) {
                     self.rt.DrawTextLayout(
                         windows_numerics::Vector2 { X: x, Y: y },
                         &layout, &brush, D2D1_DRAW_TEXT_OPTIONS_NONE,
                     );
-                }
             }
 
             // 下線
@@ -565,13 +564,12 @@ impl Renderer {
                         let text = [c as u16];
                         if let Ok(layout) = self.dwrite_factory.CreateTextLayout(
                             &text, format, cell_w, self.cell_height,
-                        ) {
-                            if let Some(brush) = self.get_brush(&fg) {
+                        )
+                            && let Some(brush) = self.get_brush(&fg) {
                                 self.rt.DrawTextLayout(
                                     windows_numerics::Vector2 { X: x, Y: y },
                                     &layout, &brush, D2D1_DRAW_TEXT_OPTIONS_NONE,
                                 );
-                            }
                         }
                     }
 
@@ -711,13 +709,12 @@ impl Renderer {
     unsafe fn draw_text(&self, text: &str, format: &IDWriteTextFormat, x: f32, y: f32, width: f32, height: f32, color: &D2D1_COLOR_F) {
         unsafe {
             let wide: Vec<u16> = text.encode_utf16().collect();
-            if let Ok(layout) = self.dwrite_factory.CreateTextLayout(&wide, format, width, height) {
-                if let Some(brush) = self.get_brush(color) {
+            if let Ok(layout) = self.dwrite_factory.CreateTextLayout(&wide, format, width, height)
+                && let Some(brush) = self.get_brush(color) {
                     self.rt.DrawTextLayout(
                         windows_numerics::Vector2 { X: x, Y: y },
                         &layout, &brush, D2D1_DRAW_TEXT_OPTIONS_NONE,
                     );
-                }
             }
         }
     }

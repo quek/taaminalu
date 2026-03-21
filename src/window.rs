@@ -170,7 +170,7 @@ pub fn create_window(app: Arc<Mutex<App>>) -> windows::core::Result<HWND> {
 
         let hicon = LoadIconW(
             Some(windows::Win32::Foundation::HINSTANCE(hinstance.0)),
-            windows::core::PCWSTR(1 as *const u16),
+            windows::core::PCWSTR(std::ptr::dangling::<u16>()),
         )?;
 
         let wc = WNDCLASSEXW {
@@ -318,11 +318,11 @@ unsafe extern "system" fn wnd_proc(
         }
         WM_IME_STARTCOMPOSITION => {
             update_ime_position(hwnd);
-            return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
         }
         WM_IME_COMPOSITION => {
             update_ime_position(hwnd);
-            return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
         }
         WM_PAINT => {
             let preedit = get_preedit(hwnd);
@@ -593,8 +593,8 @@ unsafe extern "system" fn wnd_proc(
                 );
             }
             let lines = calc_scroll_lines(delta, lines_per_notch);
-            if lines != 0 {
-                if let Some(app) = get_app(hwnd) {
+            if lines != 0
+                && let Some(app) = get_app(hwnd) {
                     let mut app = app.lock().unwrap();
                     let idx = app.active_tab;
                     let tab = &mut app.tabs[idx];
@@ -606,7 +606,6 @@ unsafe extern "system" fn wnd_proc(
                         drop(app);
                         repaint(hwnd);
                     }
-                }
             }
             LRESULT(0)
         }
