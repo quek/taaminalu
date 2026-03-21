@@ -359,9 +359,7 @@ unsafe extern "system" fn wnd_proc(
                 let app = get_app(hwnd);
                 if let Some(app) = app {
                     let mut app = app.lock().unwrap();
-                    // スクロールバック中なら最下部に戻す
-                    let idx = app.active_tab;
-                    app.tabs[idx].term.scroll_to_bottom();
+                    app.scroll_to_bottom();
                     // Alt が押されていたら ESC プレフィックス付き
                     let alt = (lparam.0 >> 29) & 1 != 0; // bit 29 = context code (Alt)
                     if alt && c.is_ascii() {
@@ -419,8 +417,7 @@ unsafe extern "system" fn wnd_proc(
                 let app = get_app(hwnd);
                 if let Some(app) = app {
                     let mut app = app.lock().unwrap();
-                    let idx = app.active_tab;
-                    app.tabs[idx].term.scroll_to_bottom();
+                    app.scroll_to_bottom();
                     let _ = app.write_pty(&seq);
                 }
                 return LRESULT(0);
@@ -852,8 +849,7 @@ fn paste_from_clipboard(hwnd: HWND) {
                     let app = get_app(hwnd);
                     if let Some(app) = app {
                         let mut app = app.lock().unwrap();
-                        let idx = app.active_tab;
-                        app.tabs[idx].term.scroll_to_bottom();
+                        app.scroll_to_bottom();
                         let _ = app.write_pty(text.as_bytes());
                     }
                 }

@@ -152,6 +152,10 @@ impl App {
 
     // --- アクティブタブへの委譲 ---
 
+    pub fn scroll_to_bottom(&mut self) {
+        self.tabs[self.active_tab].term.scroll_to_bottom();
+    }
+
     pub fn write_pty(&self, data: &[u8]) -> io::Result<usize> {
         self.active().write_pty(data)
     }
