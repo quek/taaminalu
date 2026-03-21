@@ -43,6 +43,14 @@ impl Selection {
         }
     }
 
+    /// スクロール時に選択座標をビューポートに追従させる
+    /// delta > 0: 上スクロール（コンテンツが画面下方向に移動 → row 増加）
+    /// delta < 0: 下スクロール（コンテンツが画面上方向に移動 → row 減少）
+    /// 選択範囲が完全に画面外に出た場合は false を返す
+    pub fn adjust_for_scroll(&mut self, _delta: i32, _screen_lines: usize) -> bool {
+        true
+    }
+
     /// セル (row, col) が選択範囲内か
     pub fn contains(&self, row: usize, col: usize) -> bool {
         let ((sr, sc), (er, ec)) = self.ordered();
@@ -229,5 +237,57 @@ impl App {
         self.renderer.as_ref()
             .map(|r| r.current_grid_size())
             .unwrap_or((80, 24))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_selection(start: (usize, usize), end: (usize, usize)) -> Selection {
+        Selection {
+            start,
+            end,
+            active: false,
+            mode: SelectionMode::Normal,
+            origin_word: None,
+        }
+    }
+
+    #[test]
+    fn test_上スクロールで選択行が増加() {
+        let mut sel = make_selection((5, 0), (7, 10));
+        let visible = sel.adjust_for_scroll(3, 24);
+        assert!(visible);
+        assert_eq!(sel.start.0, 8, "start.row が 3 増加すべき");
+        assert_eq!(sel.end.0, 10, "end.row が 3 増加すべき");
+        // 列は変わらない
+        assert_eq!(sel.start.1, 0);
+        assert_eq!(sel.end.1, 10);
+    }
+
+    #[test]
+    fn test_下スクロールで選択行が減少() {
+        let mut sel = make_selection((8, 0), (10, 5));
+        let visible = sel.adjust_for_scroll(-3, 24);
+        assert!(visible);
+        assert_eq!(sel.start.0, 5);
+        assert_eq!(sel.end.0, 7);
+    }
+
+    #[test]
+    fn test_上スクロールで選択が画面外に出たらfalse() {
+        // 選択が row 20-22、画面24行で delta=5 → row 25-27 → 画面外
+        let mut sel = make_selection((20, 0), (22, 5));
+        let visible = sel.adjust_for_scroll(5, 24);
+        assert!(!visible, "選択が完全に画面外に出たら false");
+    }
+
+    #[test]
+    fn test_下スクロールで選択が画面外に出たらfalse() {
+        // 選択が row 1-2、delta=-3 → 負の行 → 画面外
+        let mut sel = make_selection((1, 0), (2, 5));
+        let visible = sel.adjust_for_scroll(-3, 24);
+        assert!(!visible, "選択が完全に画面外に出たら false");
     }
 }
