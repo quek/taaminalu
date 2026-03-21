@@ -45,25 +45,6 @@ impl Selection {
         }
     }
 
-    /// スクロール時に選択座標をビューポートに追従させる
-    /// delta > 0: 上スクロール（コンテンツが画面下方向に移動 → row 増加）
-    /// delta < 0: 下スクロール（コンテンツが画面上方向に移動 → row 減少）
-    /// 選択範囲が完全に画面外に出た場合は false を返す
-    pub fn adjust_for_scroll(&mut self, delta: i32, screen_lines: usize) -> bool {
-        let new_start = self.start.0 as i32 + delta;
-        let new_end = self.end.0 as i32 + delta;
-
-        // 両方とも画面外なら不可視
-        let max_line = screen_lines as i32 - 1;
-        if (new_start > max_line && new_end > max_line) || (new_start < 0 && new_end < 0) {
-            return false;
-        }
-
-        self.start.0 = new_start.max(0) as usize;
-        self.end.0 = new_end.max(0) as usize;
-        true
-    }
-
     /// セル (row, col) が現在の display_offset で選択範囲内か
     /// ビューポート row を選択作成時の座標系に変換して判定する
     pub fn contains_at(&self, row: usize, col: usize, current_display_offset: usize) -> bool {
@@ -88,15 +69,6 @@ impl Selection {
             col <= ec
         } else {
             true
-        }
-    }
-}
-
-/// スクロール後に選択範囲を調整。画面外に出たら None にする。
-pub fn adjust_selection_after_scroll(selection: &mut Option<Selection>, delta: i32, screen_lines: usize) {
-    if let Some(sel) = selection {
-        if !sel.adjust_for_scroll(delta, screen_lines) {
-            *selection = None;
         }
     }
 }
@@ -296,68 +268,6 @@ mod tests {
             origin_word: None,
             display_offset,
         }
-    }
-
-    #[test]
-    fn test_上スクロールで選択行が増加() {
-        let mut sel = make_selection((5, 0), (7, 10));
-        let visible = sel.adjust_for_scroll(3, 24);
-        assert!(visible);
-        assert_eq!(sel.start.0, 8, "start.row が 3 増加すべき");
-        assert_eq!(sel.end.0, 10, "end.row が 3 増加すべき");
-        // 列は変わらない
-        assert_eq!(sel.start.1, 0);
-        assert_eq!(sel.end.1, 10);
-    }
-
-    #[test]
-    fn test_下スクロールで選択行が減少() {
-        let mut sel = make_selection((8, 0), (10, 5));
-        let visible = sel.adjust_for_scroll(-3, 24);
-        assert!(visible);
-        assert_eq!(sel.start.0, 5);
-        assert_eq!(sel.end.0, 7);
-    }
-
-    #[test]
-    fn test_上スクロールで選択が画面外に出たらfalse() {
-        // 選択が row 20-22、画面24行で delta=5 → row 25-27 → 画面外
-        let mut sel = make_selection((20, 0), (22, 5));
-        let visible = sel.adjust_for_scroll(5, 24);
-        assert!(!visible, "選択が完全に画面外に出たら false");
-    }
-
-    #[test]
-    fn test_下スクロールで選択が画面外に出たらfalse() {
-        // 選択が row 1-2、delta=-3 → 負の行 → 画面外
-        let mut sel = make_selection((1, 0), (2, 5));
-        let visible = sel.adjust_for_scroll(-3, 24);
-        assert!(!visible, "選択が完全に画面外に出たら false");
-    }
-
-    // --- adjust_selection_after_scroll ---
-
-    #[test]
-    fn test_選択ありスクロールで座標が調整される() {
-        let mut sel = Some(make_selection((5, 0), (7, 10)));
-        adjust_selection_after_scroll(&mut sel, 3, 24);
-        let s = sel.as_ref().expect("選択が残っているべき");
-        assert_eq!(s.start.0, 8);
-        assert_eq!(s.end.0, 10);
-    }
-
-    #[test]
-    fn test_選択ありスクロールで画面外になったら消える() {
-        let mut sel = Some(make_selection((20, 0), (22, 5)));
-        adjust_selection_after_scroll(&mut sel, 5, 24);
-        assert!(sel.is_none(), "画面外に出たら None になるべき");
-    }
-
-    #[test]
-    fn test_選択なしスクロールでも変化なし() {
-        let mut sel: Option<Selection> = None;
-        adjust_selection_after_scroll(&mut sel, 3, 24);
-        assert!(sel.is_none());
     }
 
     // --- contains_at ---
