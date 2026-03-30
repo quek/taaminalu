@@ -18,11 +18,15 @@ pub struct SharedSink {
 pub struct CompositionState {
     pub composing: bool,
     pub preedit: String,
+    /// 変換 composition 開始時に検出した、消去すべき既存文字数。
+    /// SetText(acpstart, acpend) で acpend > acpstart なら置換操作。
+    /// OnEndComposition でこの数だけバックスペースを送ってから確定テキストを送信する。
+    pub chars_to_erase: usize,
 }
 
 impl CompositionState {
     fn new() -> Self {
-        Self { composing: false, preedit: String::new() }
+        Self { composing: false, preedit: String::new(), chars_to_erase: 0 }
     }
 }
 
@@ -108,7 +112,9 @@ impl ITfContextOwnerCompositionSink_Impl for TextStore_Impl {
         &self,
         _pcomposition: Ref<ITfCompositionView>,
     ) -> Result<BOOL> {
-        self.composition.lock().unwrap().composing = true;
+        let mut comp = self.composition.lock().unwrap();
+        comp.composing = true;
+        comp.chars_to_erase = 0;
         Ok(TRUE)
     }
 
@@ -125,13 +131,21 @@ impl ITfContextOwnerCompositionSink_Impl for TextStore_Impl {
         &self,
         _pcomposition: Ref<ITfCompositionView>,
     ) -> Result<()> {
-        let preedit = {
+        let (preedit, chars_to_erase) = {
             let mut comp = self.composition.lock().unwrap();
             comp.composing = false;
-            std::mem::take(&mut comp.preedit)
+            let preedit = std::mem::take(&mut comp.preedit);
+            let erase = comp.chars_to_erase;
+            comp.chars_to_erase = 0;
+            (preedit, erase)
         };
         if !preedit.is_empty() {
             let app = self.app.lock().unwrap();
+            // 置換対象の既存文字をバックスペースで消去
+            if chars_to_erase > 0 {
+                let bs = vec![0x7fu8; chars_to_erase];
+                let _ = app.write_pty(&bs);
+            }
             let _ = app.write_pty(preedit.as_bytes());
         }
         self.invalidate();
@@ -271,8 +285,8 @@ impl ITextStoreACP_Impl for TextStore_Impl {
     fn SetText(
         &self,
         _dwflags: u32,
-        _acpstart: i32,
-        _acpend: i32,
+        acpstart: i32,
+        acpend: i32,
         pchtext: &PCWSTR,
         cch: u32,
     ) -> Result<TS_TEXTCHANGE> {
@@ -282,6 +296,11 @@ impl ITextStoreACP_Impl for TextStore_Impl {
         {
             let mut comp = self.composition.lock().unwrap();
             if comp.composing {
+                // 置換操作の検出: acpend > acpstart なら既存テキストを上書き。
+                // composition 内の最初の置換だけ記録する（chars_to_erase が 0 の時のみ更新）。
+                if acpend > acpstart && comp.chars_to_erase == 0 {
+                    comp.chars_to_erase = (acpend - acpstart) as usize;
+                }
                 comp.preedit = text;
                 drop(comp);
                 self.invalidate();
@@ -293,9 +312,9 @@ impl ITextStoreACP_Impl for TextStore_Impl {
         }
 
         Ok(TS_TEXTCHANGE {
-            acpStart: _acpstart,
-            acpOldEnd: _acpend,
-            acpNewEnd: _acpstart + cch as i32,
+            acpStart: acpstart,
+            acpOldEnd: acpend,
+            acpNewEnd: acpstart.saturating_add(cch as i32),
         })
     }
 
@@ -512,8 +531,8 @@ impl ITextStoreACP_Impl for TextStore_Impl {
 
 /// TSF セットアップの戻り値
 pub struct TsfContext {
-    pub _thread_mgr: ITfThreadMgr,
-    pub _doc_mgr: ITfDocumentMgr,
+    pub thread_mgr: ITfThreadMgr,
+    pub doc_mgr: ITfDocumentMgr,
     pub shared_sink: Arc<Mutex<SharedSink>>,
     pub composition: Arc<Mutex<CompositionState>>,
     app: Arc<Mutex<App>>,
@@ -600,21 +619,31 @@ pub fn setup_tsf(
     unsafe {
         doc_mgr.CreateContext(client_id, 0, &text_store_unk, &mut context, &mut edit_cookie)?;
         if let Some(ref ctx) = context {
-            // ITfContextOwnerCompositionSink を登録して composition の開始/終了を検知
             let source: ITfSource = ctx.cast()?;
-            composition_sink_cookie = source.AdviseSink(
+            // CONNECT_E_ADVISELIMIT: CreateContext 時に TSF が TextStore の
+            // ITfContextOwnerCompositionSink を自動登録済みの場合があるため、
+            // エラーは無視する。
+            match source.AdviseSink(
                 &ITfContextOwnerCompositionSink::IID,
                 &text_store_unk,
-            )?;
+            ) {
+                Ok(cookie) => composition_sink_cookie = cookie,
+                Err(_) => {}
+            }
 
             doc_mgr.Push(ctx)?;
         }
         thread_mgr.SetFocus(&doc_mgr)?;
     }
 
+    // ウィンドウにドキュメントマネージャを関連付け。
+    // WM_SETFOCUS 時に TSF が自動的に SetFocus を呼び出し、
+    // IME (rtry 等) が ITextStoreACP にアクセスできるようにする。
+    let _ = unsafe { thread_mgr.AssociateFocus(hwnd, &doc_mgr) };
+
     Ok(TsfContext {
-        _thread_mgr: thread_mgr,
-        _doc_mgr: doc_mgr,
+        thread_mgr,
+        doc_mgr,
         shared_sink,
         composition,
         app,

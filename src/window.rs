@@ -319,6 +319,14 @@ unsafe extern "system" fn wnd_proc(
             }
             LRESULT(0)
         }
+        WM_SETFOCUS => {
+            // TSF ドキュメントマネージャにフォーカスを復元
+            // AssociateFocus で自動的に処理されるが、明示的にも呼び出す
+            with_tsf(hwnd, |ctx| {
+                unsafe { let _ = ctx.thread_mgr.SetFocus(&ctx.doc_mgr); }
+            });
+            LRESULT(0)
+        }
         WM_IME_STARTCOMPOSITION => {
             update_ime_position(hwnd);
             unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }

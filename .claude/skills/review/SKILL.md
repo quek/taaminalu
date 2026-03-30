@@ -44,6 +44,7 @@ git diff --name-only HEAD
 | Mutex `.unwrap()` | panic でロック毒殺の連鎖 | クリティカルパスでは `unwrap_or_else` を検討 |
 | ハンドル/ポインタの寿命 | スレッド間での HWND/HANDLE 共有                      | 所有権モデルの確認                     |
 | エラーの握りつぶし       | `?` → `unwrap_or_default()` / `ok()` / `unwrap_or()` | 根本原因を調査し、原因そのものを修正する |
+| COM 初期化の連鎖失敗     | `setup_xxx().ok()` で COM セットアップ失敗が無視される、`AdviseSink` 等の `?` で後続ステップが全て無効化 | 各ステップの成功を個別に検証。部分失敗を許容する場合は `match` で明示的にハンドル |
 
 ### 4. 問題の修正
 

@@ -93,6 +93,15 @@ cargo run --release
 
 教訓: カーソル位置ずれの原因が「文字幅不一致」だと推測し、VT ストリーム操作→ unicode-width パッチ→グリッド後処理と試行錯誤したが、実際の原因は「INVERSE フラグの描画未対応」だった。グリッドダンプを最初にやっていれば、データが正しいことが即座にわかり、描画コードの確認だけで解決できた。
 
+#### COM/TSF バグの調査手順
+COM/TSF の問題はコードレビューだけでは原因を特定できない。**必ずログで検証する。**
+1. **セットアップの成功を最初に確認する**: `setup_tsf` の各ステップ（`CoCreateInstance` → `Activate` → `CreateDocumentMgr` → `CreateContext` → `AdviseSink` → `Push` → `SetFocus`）が成功しているかログで検証する。`.ok()` / `?` でエラーが握りつぶされて初期化自体が失敗しているケースがある
+2. **コールバックが呼ばれているか確認する**: `AdviseSink`, `RequestLock`, `GetText`, `OnStartComposition` 等にログを仕込み、TSF マネージャーから実際に呼ばれているか検証する
+3. **ログ出力先は `std::env::temp_dir()`**: GUI アプリは `eprintln!` が見えないため、ファイルに出力する
+4. **推測で修正するな**: 「フォーカス管理が原因かも」と推測して修正するのではなく、ログで実際の失敗箇所を特定してから修正する
+
+教訓: GetText が動かない原因を「TSF フォーカス管理の欠如」と推測して `AssociateFocus` を追加したが、実際の原因は `ITfSource::AdviseSink` が `CONNECT_E_ADVISELIMIT` を返し `?` で `setup_tsf` 全体が失敗していたこと。ログで `setup_tsf` の各ステップを検証していれば 1 往復で解決できた。
+
 ## 技術スタック
 
 | 用途 | クレート/API |
