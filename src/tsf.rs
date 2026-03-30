@@ -28,6 +28,38 @@ impl CompositionState {
     fn new() -> Self {
         Self { composing: false, preedit: String::new(), chars_to_erase: 0 }
     }
+
+    /// OnStartComposition: composition 開始
+    pub fn start(&mut self) {
+        self.composing = true;
+        self.chars_to_erase = 0;
+    }
+
+    /// SetText (composing 中): preedit 更新 + 置換検出
+    pub fn set_text(&mut self, text: String, acpstart: i32, acpend: i32) {
+        // 置換操作の検出: acpend > acpstart なら既存テキストを上書き。
+        // composition 内の最初の置換だけ記録する（chars_to_erase が 0 の時のみ更新）。
+        if acpend > acpstart && self.chars_to_erase == 0 {
+            self.chars_to_erase = (acpend - acpstart) as usize;
+        }
+        self.preedit = text;
+    }
+
+    /// OnEndComposition: composition 終了。PTY に送るバイト列を返す。
+    pub fn end(&mut self) -> Vec<u8> {
+        self.composing = false;
+        let preedit = std::mem::take(&mut self.preedit);
+        let erase = self.chars_to_erase;
+        self.chars_to_erase = 0;
+
+        let mut output = Vec::new();
+        if !preedit.is_empty() {
+            // 置換対象の既存文字をバックスペースで消去
+            output.extend(std::iter::repeat_n(0x7fu8, erase));
+            output.extend(preedit.as_bytes());
+        }
+        output
+    }
 }
 
 /// TSF ITextStoreACP + ITfContextOwnerCompositionSink 実装
@@ -112,9 +144,7 @@ impl ITfContextOwnerCompositionSink_Impl for TextStore_Impl {
         &self,
         _pcomposition: Ref<ITfCompositionView>,
     ) -> Result<BOOL> {
-        let mut comp = self.composition.lock().unwrap();
-        comp.composing = true;
-        comp.chars_to_erase = 0;
+        self.composition.lock().unwrap().start();
         Ok(TRUE)
     }
 
@@ -131,22 +161,10 @@ impl ITfContextOwnerCompositionSink_Impl for TextStore_Impl {
         &self,
         _pcomposition: Ref<ITfCompositionView>,
     ) -> Result<()> {
-        let (preedit, chars_to_erase) = {
-            let mut comp = self.composition.lock().unwrap();
-            comp.composing = false;
-            let preedit = std::mem::take(&mut comp.preedit);
-            let erase = comp.chars_to_erase;
-            comp.chars_to_erase = 0;
-            (preedit, erase)
-        };
-        if !preedit.is_empty() {
+        let output = self.composition.lock().unwrap().end();
+        if !output.is_empty() {
             let app = self.app.lock().unwrap();
-            // 置換対象の既存文字をバックスペースで消去
-            if chars_to_erase > 0 {
-                let bs = vec![0x7fu8; chars_to_erase];
-                let _ = app.write_pty(&bs);
-            }
-            let _ = app.write_pty(preedit.as_bytes());
+            let _ = app.write_pty(&output);
         }
         self.invalidate();
         Ok(())
@@ -296,12 +314,7 @@ impl ITextStoreACP_Impl for TextStore_Impl {
         {
             let mut comp = self.composition.lock().unwrap();
             if comp.composing {
-                // 置換操作の検出: acpend > acpstart なら既存テキストを上書き。
-                // composition 内の最初の置換だけ記録する（chars_to_erase が 0 の時のみ更新）。
-                if acpend > acpstart && comp.chars_to_erase == 0 {
-                    comp.chars_to_erase = (acpend - acpstart) as usize;
-                }
-                comp.preedit = text;
+                comp.set_text(text, acpstart, acpend);
                 drop(comp);
                 self.invalidate();
             } else {
@@ -623,12 +636,11 @@ pub fn setup_tsf(
             // CONNECT_E_ADVISELIMIT: CreateContext 時に TSF が TextStore の
             // ITfContextOwnerCompositionSink を自動登録済みの場合があるため、
             // エラーは無視する。
-            match source.AdviseSink(
+            if let Ok(cookie) = source.AdviseSink(
                 &ITfContextOwnerCompositionSink::IID,
                 &text_store_unk,
             ) {
-                Ok(cookie) => composition_sink_cookie = cookie,
-                Err(_) => {}
+                composition_sink_cookie = cookie;
             }
 
             doc_mgr.Push(ctx)?;
@@ -649,4 +661,100 @@ pub fn setup_tsf(
         app,
         _composition_sink_cookie: composition_sink_cookie,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::term::TermWrapper;
+
+    const BS: u8 = 0x7f;
+
+    /// composition 1回分をシミュレート（start → set_text → end）
+    fn simulate_composition(comp: &mut CompositionState, text: &str, acpstart: i32, acpend: i32) -> Vec<u8> {
+        comp.start();
+        comp.set_text(text.into(), acpstart, acpend);
+        comp.end()
+    }
+
+    // --- Composition: 置換検出 ---
+
+    #[test]
+    fn test_rtry風変換でバックスペースと漢字が送られる() {
+        // rtry パターン: 1文字ずつ独立した composition → 変換で置換 composition
+        let mut comp = CompositionState::new();
+
+        // "ね" 入力（挿入: acp=0..0）
+        let out1 = simulate_composition(&mut comp, "ね", 0, 0);
+        assert_eq!(out1, "ね".as_bytes());
+
+        // "こ" 入力（挿入: acp=1..1）
+        let out2 = simulate_composition(&mut comp, "こ", 1, 1);
+        assert_eq!(out2, "こ".as_bytes());
+
+        // "ねこ" → "猫" 変換（置換: acp=0..2 → 2文字消去）
+        let out3 = simulate_composition(&mut comp, "猫", 0, 2);
+        let mut expected = vec![BS, BS];
+        expected.extend("猫".as_bytes());
+        assert_eq!(out3, expected);
+    }
+
+    #[test]
+    fn test_変換なしの連続入力でバックスペースが送られない() {
+        let mut comp = CompositionState::new();
+
+        let out1 = simulate_composition(&mut comp, "ね", 0, 0);
+        assert_eq!(out1, "ね".as_bytes());
+
+        let out2 = simulate_composition(&mut comp, "こ", 1, 1);
+        assert_eq!(out2, "こ".as_bytes());
+
+        // バックスペースなし
+        assert!(!out1.contains(&BS));
+        assert!(!out2.contains(&BS));
+    }
+
+    #[test]
+    fn test_単一文字の変換() {
+        let mut comp = CompositionState::new();
+
+        // "あ" 入力
+        let out1 = simulate_composition(&mut comp, "あ", 0, 0);
+        assert_eq!(out1, "あ".as_bytes());
+
+        // "あ" → "亜" 変換（置換: acp=0..1）
+        let out2 = simulate_composition(&mut comp, "亜", 0, 1);
+        let mut expected = vec![BS];
+        expected.extend("亜".as_bytes());
+        assert_eq!(out2, expected);
+    }
+
+    #[test]
+    fn test_preeditが空なら何も送信しない() {
+        let mut comp = CompositionState::new();
+        comp.start();
+        // SetText を呼ばずに end
+        let output = comp.end();
+        assert!(output.is_empty());
+    }
+
+    // --- GetText 基盤: screen_text ---
+
+    #[test]
+    fn test_screen_textが日本語テキストを含む() {
+        let mut term = TermWrapper::new(80, 24);
+        term.process("echo 漢字\r\n".as_bytes());
+        let text = term.screen_text();
+        assert!(text.contains("漢字"), "screen_text に '漢字' が含まれるべき: {:?}", &text[..80.min(text.len())]);
+    }
+
+    #[test]
+    fn test_screen_textがwide_char_spacerをスキップする() {
+        let mut term = TermWrapper::new(80, 24);
+        term.process("日本\r\n".as_bytes());
+        let text = term.screen_text();
+        // "日本" の後に spacer 文字が混じっていないこと
+        let first_line: String = text.lines().next().unwrap_or("").chars().take(4).collect();
+        assert!(first_line.starts_with("日本"), "先頭が '日本' であるべき: {:?}", first_line);
+    }
 }
