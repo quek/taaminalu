@@ -44,6 +44,7 @@ fn main() {
 
     // TSF セットアップ
     let tsf_ctx = tsf::setup_tsf(Arc::clone(&app), hwnd).ok();
+    let keystroke_mgr = tsf_ctx.as_ref().map(|ctx| ctx.keystroke_mgr.clone());
     window::set_tsf_context(hwnd, tsf_ctx);
 
     // 初期タブの PTY リーダー + プロセス監視スレッドを起動
@@ -56,6 +57,6 @@ fn main() {
         window::start_process_watcher(hwnd, proc_h, tab.id);
     }
 
-    // メッセージループ
-    window::run_message_loop();
+    // メッセージループ（ITfKeystrokeMgr で TSF にキーを先にルーティング）
+    window::run_message_loop(keystroke_mgr);
 }

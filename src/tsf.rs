@@ -35,14 +35,44 @@ impl CompositionState {
         self.chars_to_erase = 0;
     }
 
-    /// SetText (composing 中): preedit 更新 + 置換検出
-    pub fn set_text(&mut self, text: String, acpstart: i32, acpend: i32) {
-        // 置換操作の検出: acpend > acpstart なら既存テキストを上書き。
-        // composition 内の最初の置換だけ記録する（chars_to_erase が 0 の時のみ更新）。
-        if acpend > acpstart && self.chars_to_erase == 0 {
-            self.chars_to_erase = (acpend - acpstart) as usize;
+    /// SetText (composing 中): preedit の ACP 範囲を編集 + 置換検出
+    ///
+    /// `base_cursor_acp`: preedit 開始位置（ターミナルバッファ上のカーソル ACP）。
+    /// MS IME は各文字を個別の ACP 範囲で挿入するため、preedit 全体の上書きではなく
+    /// 範囲編集が必要。
+    pub fn set_text(&mut self, text: String, acpstart: i32, acpend: i32, base_cursor_acp: i32) {
+        // acpstart が preedit 領域の前（ベーステキスト内）にある場合は、
+        // PTY に送信済みのテキストを含む置換操作（rtry の変換パターン）。
+        // 送信済み部分のみ chars_to_erase にカウントし、preedit を全置換する。
+        if acpstart < base_cursor_acp {
+            if self.chars_to_erase == 0 {
+                self.chars_to_erase = (base_cursor_acp - acpstart) as usize;
+            }
+            self.preedit = text;
+            return;
         }
-        self.preedit = text;
+
+        // preedit 内のオフセット（UTF-16 コードユニット単位）
+        let offset_start = (acpstart - base_cursor_acp) as usize;
+        let offset_end = (acpend - base_cursor_acp) as usize;
+
+        // UTF-16 オフセット → preedit 文字列のバイトオフセットに変換
+        let preedit_utf16: Vec<u16> = self.preedit.encode_utf16().collect();
+        let byte_start = String::from_utf16_lossy(
+            &preedit_utf16[..offset_start.min(preedit_utf16.len())]
+        ).len();
+        let byte_end = String::from_utf16_lossy(
+            &preedit_utf16[..offset_end.min(preedit_utf16.len())]
+        ).len();
+
+        // 範囲 [byte_start..byte_end] を text で置換
+        let mut new_preedit = String::with_capacity(self.preedit.len() + text.len());
+        new_preedit.push_str(&self.preedit[..byte_start]);
+        new_preedit.push_str(&text);
+        if byte_end <= self.preedit.len() {
+            new_preedit.push_str(&self.preedit[byte_end..]);
+        }
+        self.preedit = new_preedit;
     }
 
     /// OnEndComposition: composition 終了。PTY に送るバイト列を返す。
@@ -214,7 +244,7 @@ impl ITextStoreACP_Impl for TextStore_Impl {
     fn GetStatus(&self) -> Result<TS_STATUS> {
         Ok(TS_STATUS {
             dwDynamicFlags: 0,
-            dwStaticFlags: 0,
+            dwStaticFlags: TS_SS_NOHIDDENTEXT,
         })
     }
 
@@ -314,7 +344,8 @@ impl ITextStoreACP_Impl for TextStore_Impl {
         {
             let mut comp = self.composition.lock().unwrap();
             if comp.composing {
-                comp.set_text(text, acpstart, acpend);
+                let base_acp = self.base_cursor_acp();
+                comp.set_text(text, acpstart, acpend, base_acp);
                 drop(comp);
                 self.invalidate();
             } else {
@@ -546,6 +577,7 @@ impl ITextStoreACP_Impl for TextStore_Impl {
 pub struct TsfContext {
     pub thread_mgr: ITfThreadMgr,
     pub doc_mgr: ITfDocumentMgr,
+    pub keystroke_mgr: ITfKeystrokeMgr,
     pub shared_sink: Arc<Mutex<SharedSink>>,
     pub composition: Arc<Mutex<CompositionState>>,
     app: Arc<Mutex<App>>,
@@ -653,9 +685,15 @@ pub fn setup_tsf(
     // IME (rtry 等) が ITextStoreACP にアクセスできるようにする。
     let _ = unsafe { thread_mgr.AssociateFocus(hwnd, &doc_mgr) };
 
+    // ITfKeystrokeMgr を取得。メッセージループで TSF にキーをルーティングするために必要。
+    // これがないと CUAS が IMM32 互換パスにフォールバックし、MS IME の composition が
+    // ITextStoreACP 経由ではなく WM_IME_COMPOSITION 経由になる。
+    let keystroke_mgr: ITfKeystrokeMgr = thread_mgr.cast()?;
+
     Ok(TsfContext {
         thread_mgr,
         doc_mgr,
+        keystroke_mgr,
         shared_sink,
         composition,
         app,
@@ -670,30 +708,32 @@ mod tests {
 
     const BS: u8 = 0x7f;
 
-    /// composition 1回分をシミュレート（start → set_text → end）
-    fn simulate_composition(comp: &mut CompositionState, text: &str, acpstart: i32, acpend: i32) -> Vec<u8> {
-        comp.start();
-        comp.set_text(text.into(), acpstart, acpend);
-        comp.end()
-    }
-
-    // --- Composition: 置換検出 ---
+    // --- Composition: rtry パターン（1文字ずつ独立した composition）---
+    // rtry は各文字を独立した composition で確定する。変換時は PTY 送信済みテキストを置換。
+    // composition 間でカーソル（base_cursor_acp）が進む。
 
     #[test]
     fn test_rtry風変換でバックスペースと漢字が送られる() {
-        // rtry パターン: 1文字ずつ独立した composition → 変換で置換 composition
         let mut comp = CompositionState::new();
 
-        // "ね" 入力（挿入: acp=0..0）
-        let out1 = simulate_composition(&mut comp, "ね", 0, 0);
+        // "ね" 入力（base=0, 挿入: acp=0..0）
+        comp.start();
+        comp.set_text("ね".into(), 0, 0, 0);
+        let out1 = comp.end();
         assert_eq!(out1, "ね".as_bytes());
+        // カーソル → 1
 
-        // "こ" 入力（挿入: acp=1..1）
-        let out2 = simulate_composition(&mut comp, "こ", 1, 1);
+        // "こ" 入力（base=1, 挿入: acp=1..1）
+        comp.start();
+        comp.set_text("こ".into(), 1, 1, 1);
+        let out2 = comp.end();
         assert_eq!(out2, "こ".as_bytes());
+        // カーソル → 2
 
-        // "ねこ" → "猫" 変換（置換: acp=0..2 → 2文字消去）
-        let out3 = simulate_composition(&mut comp, "猫", 0, 2);
+        // "ねこ" → "猫" 変換（base=2, 置換: acp=0..2 → base より前 → BS×2）
+        comp.start();
+        comp.set_text("猫".into(), 0, 2, 2);
+        let out3 = comp.end();
         let mut expected = vec![BS, BS];
         expected.extend("猫".as_bytes());
         assert_eq!(out3, expected);
@@ -703,13 +743,16 @@ mod tests {
     fn test_変換なしの連続入力でバックスペースが送られない() {
         let mut comp = CompositionState::new();
 
-        let out1 = simulate_composition(&mut comp, "ね", 0, 0);
+        comp.start();
+        comp.set_text("ね".into(), 0, 0, 0);
+        let out1 = comp.end();
         assert_eq!(out1, "ね".as_bytes());
 
-        let out2 = simulate_composition(&mut comp, "こ", 1, 1);
+        comp.start();
+        comp.set_text("こ".into(), 1, 1, 1);
+        let out2 = comp.end();
         assert_eq!(out2, "こ".as_bytes());
 
-        // バックスペースなし
         assert!(!out1.contains(&BS));
         assert!(!out2.contains(&BS));
     }
@@ -718,12 +761,17 @@ mod tests {
     fn test_単一文字の変換() {
         let mut comp = CompositionState::new();
 
-        // "あ" 入力
-        let out1 = simulate_composition(&mut comp, "あ", 0, 0);
+        // "あ" 入力（base=0）
+        comp.start();
+        comp.set_text("あ".into(), 0, 0, 0);
+        let out1 = comp.end();
         assert_eq!(out1, "あ".as_bytes());
+        // カーソル → 1
 
-        // "あ" → "亜" 変換（置換: acp=0..1）
-        let out2 = simulate_composition(&mut comp, "亜", 0, 1);
+        // "あ" → "亜" 変換（base=1, acp=0..1 → base より前 → BS×1）
+        comp.start();
+        comp.set_text("亜".into(), 0, 1, 1);
+        let out2 = comp.end();
         let mut expected = vec![BS];
         expected.extend("亜".as_bytes());
         assert_eq!(out2, expected);
@@ -733,9 +781,42 @@ mod tests {
     fn test_preeditが空なら何も送信しない() {
         let mut comp = CompositionState::new();
         comp.start();
-        // SetText を呼ばずに end
         let output = comp.end();
         assert!(output.is_empty());
+    }
+
+    // --- Composition: MS IME パターン（1 composition 内で逐次挿入）---
+    // MS IME は1つの composition 内で全文字を逐次挿入し、変換も preedit 内で行う。
+    // base_cursor_acp は composition 中変わらない。
+
+    #[test]
+    fn test_ms_ime風の逐次挿入でpreeditが蓄積される() {
+        let mut comp = CompositionState::new();
+        comp.start();
+        comp.set_text("あ".into(), 0, 0, 0);
+        assert_eq!(comp.preedit, "あ");
+        comp.set_text("い".into(), 1, 1, 0);
+        assert_eq!(comp.preedit, "あい");
+        comp.set_text("う".into(), 2, 2, 0);
+        assert_eq!(comp.preedit, "あいう");
+        let output = comp.end();
+        assert_eq!(output, "あいう".as_bytes());
+    }
+
+    #[test]
+    fn test_ms_ime風の変換はpreedit内置換なのでバックスペースなし() {
+        let mut comp = CompositionState::new();
+        comp.start();
+        comp.set_text("あ".into(), 0, 0, 0);
+        comp.set_text("い".into(), 1, 1, 0);
+        comp.set_text("う".into(), 2, 2, 0);
+        assert_eq!(comp.preedit, "あいう");
+        // 変換: preedit 内で "あいう" → "合い"（acp=0..3, base=0 → preedit 内置換）
+        comp.set_text("合い".into(), 0, 3, 0);
+        assert_eq!(comp.preedit, "合い");
+        let output = comp.end();
+        // preedit 内の置換なので BS なし
+        assert_eq!(output, "合い".as_bytes());
     }
 
     // --- GetText 基盤: screen_text ---

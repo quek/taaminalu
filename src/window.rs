@@ -216,12 +216,39 @@ pub fn create_window(app: Arc<Mutex<App>>) -> windows::core::Result<HWND> {
     }
 }
 
-pub fn run_message_loop() {
+/// TSF にキーを先にルーティングするメッセージループ。
+/// `ITfKeystrokeMgr` が TSF/TIP にキーを渡し、TSF が処理した場合は
+/// `TranslateMessage` をスキップする（IMM32 フォールバックを防ぐ）。
+pub fn run_message_loop(keystroke_mgr: Option<windows::Win32::UI::TextServices::ITfKeystrokeMgr>) {
     let mut msg = MSG::default();
     unsafe {
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
-            let _ = TranslateMessage(&msg);
-            DispatchMessageW(&msg);
+            let mut eaten = false;
+            if let Some(ref km) = keystroke_mgr {
+                match msg.message {
+                    WM_KEYDOWN => {
+                        if let Ok(f) = km.TestKeyDown(msg.wParam, msg.lParam)
+                            && f.as_bool()
+                        {
+                            let _ = km.KeyDown(msg.wParam, msg.lParam);
+                            eaten = true;
+                        }
+                    }
+                    WM_KEYUP => {
+                        if let Ok(f) = km.TestKeyUp(msg.wParam, msg.lParam)
+                            && f.as_bool()
+                        {
+                            let _ = km.KeyUp(msg.wParam, msg.lParam);
+                            eaten = true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if !eaten {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
         }
     }
 }
@@ -329,11 +356,15 @@ unsafe extern "system" fn wnd_proc(
         }
         WM_IME_STARTCOMPOSITION => {
             update_ime_position(hwnd);
-            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+            // TSF が composition を処理するため DefWindowProcW を呼ばない。
+            // DefWindowProcW を呼ぶとシステムの composition ウィンドウが表示される。
+            LRESULT(0)
         }
         WM_IME_COMPOSITION => {
             update_ime_position(hwnd);
-            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+            // TSF が ITextStoreACP 経由で composition を処理するため
+            // DefWindowProcW を呼ばない。呼ぶと WM_CHAR が生成されて二重入力になる。
+            LRESULT(0)
         }
         WM_PAINT => {
             let preedit = get_preedit(hwnd);
@@ -365,6 +396,11 @@ unsafe extern "system" fn wnd_proc(
             if let Some(c) = char::from_u32(ch) {
                 // VK_BACK は WM_KEYDOWN で処理済み（0x08=BS, 0x7F=DEL 両方をスキップ）
                 if c == '\x08' || c == '\x7f' {
+                    return LRESULT(0);
+                }
+                // TSF が有効な場合、非 ASCII の WM_CHAR は TSF の OnEndComposition で
+                // 既に PTY に送信済み。TSF が後方互換で生成する WM_CHAR を抑制する。
+                if !c.is_ascii() && with_tsf(hwnd, |_| ()).is_some() {
                     return LRESULT(0);
                 }
                 let app = get_app(hwnd);
