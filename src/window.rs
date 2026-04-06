@@ -929,7 +929,9 @@ fn paste_from_clipboard(hwnd: HWND) {
                     if let Some(app) = app {
                         let mut app = app.lock().unwrap();
                         app.scroll_to_bottom();
-                        let _ = app.write_pty(text.as_bytes());
+                        // Windows クリップボードは \r\n 改行。PTY には \r のみ送信する
+                        let converted = text.replace("\r\n", "\r");
+                        let _ = app.write_pty(converted.as_bytes());
                     }
                 }
                 let _ = GlobalUnlock(hglobal);
