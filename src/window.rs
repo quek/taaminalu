@@ -55,6 +55,10 @@ fn load_geometry() -> Option<WindowGeometry> {
 }
 
 fn save_geometry(hwnd: HWND) {
+    // 最大化・最小化時は保存しない（通常状態のサイズ・位置のみ保存）
+    if unsafe { IsZoomed(hwnd) }.as_bool() || unsafe { IsIconic(hwnd) }.as_bool() {
+        return;
+    }
     let mut rect = RECT::default();
     if unsafe { GetWindowRect(hwnd, &mut rect) }.is_err() {
         return;
