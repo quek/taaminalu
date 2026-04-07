@@ -486,6 +486,8 @@ impl Renderer {
             for line_idx in 0..lines {
                 let row = &grid[Line(line_idx as i32 - display_offset)];
                 let y = (TAB_BAR_HEIGHT + line_idx as f32 * self.cell_height).floor();
+                // 隣接行とのサブピクセル隙間を防ぐため、下端もスナップ
+                let cell_h = (TAB_BAR_HEIGHT + (line_idx + 1) as f32 * self.cell_height).floor() - y;
 
                 for col_idx in 0..cols {
                     let cell = &row[Column(col_idx)];
@@ -545,7 +547,7 @@ impl Renderer {
                         } else {
                             &cell_bg
                         };
-                        self.fill_rect(x, y, x + cell_w, y + self.cell_height, bg);
+                        self.fill_rect(x, y, x + cell_w, y + cell_h, bg);
                     }
 
                     // HIDDEN: テキストを描画しない
@@ -563,7 +565,7 @@ impl Renderer {
 
                         let text = [c as u16];
                         if let Ok(layout) = self.dwrite_factory.CreateTextLayout(
-                            &text, format, cell_w, self.cell_height,
+                            &text, format, cell_w, cell_h,
                         )
                             && let Some(brush) = self.get_brush(&fg) {
                                 self.rt.DrawTextLayout(
@@ -584,24 +586,24 @@ impl Renderer {
 
                     // UNDERLINE 各種: セル下部に線を描画
                     if flags.contains(Flags::UNDERCURL) {
-                        self.draw_undercurl(x, y + self.cell_height - 2.0, cell_w, &ul_color);
+                        self.draw_undercurl(x, y + cell_h - 2.0, cell_w, &ul_color);
                     } else if flags.contains(Flags::DOTTED_UNDERLINE) {
-                        self.draw_styled_line(x, y + self.cell_height - 0.5, cell_w, &ul_color, &self.dotted_stroke);
+                        self.draw_styled_line(x, y + cell_h - 0.5, cell_w, &ul_color, &self.dotted_stroke);
                     } else if flags.contains(Flags::DASHED_UNDERLINE) {
-                        self.draw_styled_line(x, y + self.cell_height - 0.5, cell_w, &ul_color, &self.dashed_stroke);
+                        self.draw_styled_line(x, y + cell_h - 0.5, cell_w, &ul_color, &self.dashed_stroke);
                     } else if flags.contains(Flags::DOUBLE_UNDERLINE) {
-                        let line_y = y + self.cell_height - 1.0;
+                        let line_y = y + cell_h - 1.0;
                         self.fill_rect(x, line_y, x + cell_w, line_y + 1.0, &ul_color);
                         self.fill_rect(x, line_y - 2.0, x + cell_w, line_y - 1.0, &ul_color);
                     } else if flags.contains(Flags::UNDERLINE) {
-                        let line_y = y + self.cell_height - 1.0;
+                        let line_y = y + cell_h - 1.0;
                         self.fill_rect(x, line_y, x + cell_w, line_y + 1.0, &ul_color);
                     }
 
                     // STRIKEOUT: セル中央に取り消し線
                     if is_strikeout {
                         let strike_color = if is_cursor { BG_COLOR } else { cell_fg };
-                        self.fill_rect(x, y + self.cell_height * 0.5, x + cell_w, y + self.cell_height * 0.5 + 1.0, &strike_color);
+                        self.fill_rect(x, y + cell_h * 0.5, x + cell_w, y + cell_h * 0.5 + 1.0, &strike_color);
                     }
                 }
             }
