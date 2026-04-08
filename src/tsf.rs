@@ -8,6 +8,23 @@ use windows::Win32::UI::TextServices::*;
 
 use crate::app::App;
 
+/// TSF デバッグログを temp_dir/taaminalu_tsf.log に出力
+pub fn tsf_log(msg: &str) {
+    use std::io::Write;
+    let path = std::env::temp_dir().join("taaminalu_tsf.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let secs = now.as_secs() % 86400; // 時刻の秒部分のみ
+        let h = secs / 3600;
+        let m = (secs % 3600) / 60;
+        let s = secs % 60;
+        let ms = now.subsec_millis();
+        let _ = writeln!(f, "[{h:02}:{m:02}:{s:02}.{ms:03}] {msg}");
+    }
+}
+
 /// 共有 TSF シンク（TextStore と外部通知コードの両方からアクセス）
 pub struct SharedSink {
     pub sink: Option<ITextStoreACPSink>,
@@ -42,8 +59,7 @@ impl CompositionState {
     /// 範囲編集が必要。
     pub fn set_text(&mut self, text: String, acpstart: i32, acpend: i32, base_cursor_acp: i32) {
         // acpstart が preedit 領域の前（ベーステキスト内）にある場合は、
-        // PTY に送信済みのテキストを含む置換操作（rtry の変換パターン）。
-        // 送信済み部分のみ chars_to_erase にカウントし、preedit を全置換する。
+        // PTY に送信済みのテキストを含む置換操作。
         if acpstart < base_cursor_acp {
             if self.chars_to_erase == 0 {
                 self.chars_to_erase = (base_cursor_acp - acpstart) as usize;
@@ -92,6 +108,14 @@ impl CompositionState {
     }
 }
 
+/// ロック中にバッファの一貫性を保つためのスナップショット。
+/// PTY リーダースレッドがロック中にバッファを更新しても、
+/// OnLockGranted 内の GetText/GetSelection は同じ状態を返す。
+struct LockSnapshot {
+    base_text: String,     // screen_text（preedit を含まない）
+    base_cursor_acp: usize, // cursor_acp（preedit を含まない）
+}
+
 /// TSF ITextStoreACP + ITfContextOwnerCompositionSink 実装
 #[implement(ITextStoreACP, ITfContextOwnerCompositionSink)]
 pub struct TextStore {
@@ -100,6 +124,10 @@ pub struct TextStore {
     shared_sink: Arc<Mutex<SharedSink>>,
     lock_flags: Mutex<u32>,
     composition: Arc<Mutex<CompositionState>>,
+    /// OnLockGranted 中のみ有効なスナップショット
+    snapshot: Mutex<Option<LockSnapshot>>,
+    /// composition 終了後のスナップショット保持期限
+    retain_until: Arc<Mutex<Option<std::time::Instant>>>,
 }
 
 impl TextStore {
@@ -108,6 +136,7 @@ impl TextStore {
         hwnd: HWND,
         shared_sink: Arc<Mutex<SharedSink>>,
         composition: Arc<Mutex<CompositionState>>,
+        retain_until: Arc<Mutex<Option<std::time::Instant>>>,
     ) -> Self {
         Self {
             app,
@@ -115,19 +144,28 @@ impl TextStore {
             shared_sink,
             lock_flags: Mutex::new(0),
             composition,
+            snapshot: Mutex::new(None),
+            retain_until,
         }
+    }
+
+    /// ベーステキストとカーソル ACP を取得（スナップショットがあればそこから）
+    fn base_text_and_cursor(&self) -> (String, usize) {
+        if let Some(ref snap) = *self.snapshot.lock().unwrap() {
+            return (snap.base_text.clone(), snap.base_cursor_acp);
+        }
+        let app = self.app.lock().unwrap();
+        (app.screen_text(), app.cursor_acp())
     }
 
     /// ターミナルバッファのテキスト（composition 中は preedit を含む仮想ドキュメント）
     fn get_text_content(&self) -> String {
         let preedit = self.composition.lock().unwrap().preedit.clone();
-        let app = self.app.lock().unwrap();
-        let base = app.screen_text();
+        let (base, cursor_acp) = self.base_text_and_cursor();
         if preedit.is_empty() {
             return base;
         }
         // カーソル位置に preedit を挿入した仮想ドキュメントを返す
-        let cursor_acp = app.cursor_acp();
         let utf16: Vec<u16> = base.encode_utf16().collect();
         let pos = cursor_acp.min(utf16.len());
         let before = String::from_utf16_lossy(&utf16[..pos]);
@@ -138,13 +176,14 @@ impl TextStore {
     /// カーソル ACP（composition 中は preedit 末尾を返す）
     fn cursor_to_acp(&self) -> i32 {
         let preedit_len = self.composition.lock().unwrap().preedit.encode_utf16().count() as i32;
-        let app = self.app.lock().unwrap();
-        (app.cursor_acp() as i32).saturating_add(preedit_len)
+        let (_, base_acp) = self.base_text_and_cursor();
+        (base_acp as i32).saturating_add(preedit_len)
     }
 
     /// ターミナルバッファ上のカーソル ACP（preedit を含まない）
     fn base_cursor_acp(&self) -> i32 {
-        self.app.lock().unwrap().cursor_acp() as i32
+        let (_, base_acp) = self.base_text_and_cursor();
+        base_acp as i32
     }
 
     fn invalidate(&self) {
@@ -174,6 +213,12 @@ impl ITfContextOwnerCompositionSink_Impl for TextStore_Impl {
         &self,
         _pcomposition: Ref<ITfCompositionView>,
     ) -> Result<BOOL> {
+        tsf_log("OnStartComposition");
+        // 保持フラグをクリア（次の RequestLock 後に期限切れとして扱われる）。
+        // スナップショット自体は変更しない。保持スナップショットには前回の
+        // composition で確定した文字が bake-in されており、この上に新しい
+        // preedit を重ねることで「ねこ」のような連続入力が正しく見える。
+        *self.retain_until.lock().unwrap() = None;
         self.composition.lock().unwrap().start();
         Ok(TRUE)
     }
@@ -183,6 +228,8 @@ impl ITfContextOwnerCompositionSink_Impl for TextStore_Impl {
         _pcomposition: Ref<ITfCompositionView>,
         _prangenew: Ref<ITfRange>,
     ) -> Result<()> {
+        let preedit = self.composition.lock().unwrap().preedit.clone();
+        tsf_log(&format!("OnUpdateComposition: preedit={preedit:?}"));
         self.invalidate();
         Ok(())
     }
@@ -191,11 +238,33 @@ impl ITfContextOwnerCompositionSink_Impl for TextStore_Impl {
         &self,
         _pcomposition: Ref<ITfCompositionView>,
     ) -> Result<()> {
+        // preedit をクリアする前に、確定文字を含む仮想ドキュメントをキャプチャ。
+        // これにより、rtry が後で GetText を読んだとき確定済み文字が見える。
+        let virtual_text = self.get_text_content();
+        let virtual_cursor = self.cursor_to_acp();
+
         let output = self.composition.lock().unwrap().end();
+        tsf_log(&format!(
+            "OnEndComposition: output={} bytes {:?}",
+            output.len(),
+            String::from_utf8_lossy(&output)
+        ));
         if !output.is_empty() {
-            let app = self.app.lock().unwrap();
-            let _ = app.write_pty(&output);
+            // TSF ロック中の直接 write_pty は ConPTY エコーのタイミング問題を起こすため、
+            // PostMessage で遅延送信する。
+            crate::window::post_deferred_pty_write(self.hwnd, output);
         }
+        // 確定文字を含むスナップショットを保持（交ぜ書き変換のため）
+        *self.snapshot.lock().unwrap() = Some(LockSnapshot {
+            base_text: virtual_text,
+            base_cursor_acp: virtual_cursor as usize,
+        });
+        *self.retain_until.lock().unwrap() =
+            Some(std::time::Instant::now() + std::time::Duration::from_millis(3000));
+        tsf_log(&format!(
+            "OnEndComposition: snapshot retained (cursor={})",
+            virtual_cursor
+        ));
         self.invalidate();
         Ok(())
     }
@@ -210,6 +279,7 @@ impl ITextStoreACP_Impl for TextStore_Impl {
         punk: Ref<IUnknown>,
         dwmask: u32,
     ) -> Result<()> {
+        tsf_log(&format!("AdviseSink: mask=0x{dwmask:08x}"));
         let sink: ITextStoreACPSink = punk.ok()?.cast()?;
         let mut shared = self.shared_sink.lock().unwrap();
         shared.sink = Some(sink);
@@ -225,23 +295,64 @@ impl ITextStoreACP_Impl for TextStore_Impl {
     }
 
     fn RequestLock(&self, dwlockflags: u32) -> Result<HRESULT> {
+        let rw = if dwlockflags & TS_LF_READWRITE.0 == TS_LF_READWRITE.0 { "RW" }
+                 else if dwlockflags & TS_LF_READ.0 != 0 { "R" }
+                 else { "?" };
+        tsf_log(&format!("RequestLock: flags=0x{dwlockflags:08x} ({rw})"));
         let sink = self.shared_sink.lock().unwrap().sink.clone();
         if let Some(sink) = sink {
+            // 保持中 or composition 中はスナップショットを再利用
+            let retained = {
+                let retain = self.retain_until.lock().unwrap();
+                matches!(*retain, Some(deadline) if std::time::Instant::now() < deadline)
+            };
+            let composing = self.composition.lock().unwrap().composing;
+            if (retained || composing) && self.snapshot.lock().unwrap().is_some() {
+                tsf_log(&format!(
+                    "RequestLock: reusing snapshot (retained={retained}, composing={composing})"
+                ));
+            } else {
+                let app = self.app.lock().unwrap();
+                *self.snapshot.lock().unwrap() = Some(LockSnapshot {
+                    base_text: app.screen_text(),
+                    base_cursor_acp: app.cursor_acp(),
+                });
+            }
+
             *self.lock_flags.lock().unwrap() = dwlockflags;
             let hr = unsafe {
                 sink.OnLockGranted(TEXT_STORE_LOCK_FLAGS(dwlockflags))
             };
             *self.lock_flags.lock().unwrap() = 0;
+
+            // 保持中 or composition 中はスナップショットを維持
+            let still_retained = {
+                let retain = self.retain_until.lock().unwrap();
+                matches!(*retain, Some(deadline) if std::time::Instant::now() < deadline)
+            };
+            let still_composing = self.composition.lock().unwrap().composing;
+            if !still_retained && !still_composing {
+                *self.snapshot.lock().unwrap() = None;
+                *self.retain_until.lock().unwrap() = None;
+            }
+
+            let hr_code = match &hr {
+                Ok(()) => S_OK.0,
+                Err(e) => e.code().0,
+            };
+            tsf_log(&format!("RequestLock: OnLockGranted returned hr=0x{hr_code:08x}"));
             match hr {
                 Ok(()) => Ok(S_OK),
                 Err(e) => Ok(e.code()),
             }
         } else {
+            tsf_log("RequestLock: no sink, returning E_FAIL");
             Ok(E_FAIL)
         }
     }
 
     fn GetStatus(&self) -> Result<TS_STATUS> {
+        tsf_log("GetStatus: flags=TS_SS_NOHIDDENTEXT");
         Ok(TS_STATUS {
             dwDynamicFlags: 0,
             dwStaticFlags: TS_SS_NOHIDDENTEXT,
@@ -274,6 +385,7 @@ impl ITextStoreACP_Impl for TextStore_Impl {
             return Ok(());
         }
         let acp = self.cursor_to_acp();
+        tsf_log(&format!("GetSelection: acp={acp}"));
         unsafe {
             (*pselection).acpStart = acp;
             (*pselection).acpEnd = acp;
@@ -313,6 +425,15 @@ impl ITextStoreACP_Impl for TextStore_Impl {
         let slice = &utf16[start..end];
         let copy_len = slice.len().min(cchplainreq as usize);
 
+        // ログ: 返すテキストの先頭20文字
+        let preview = String::from_utf16_lossy(&slice[..copy_len.min(20)]);
+        let preview_escaped = preview.replace('\n', "\\n").replace(' ', "·");
+        tsf_log(&format!(
+            "GetText: start={acpstart}, end={acpend}, req={cchplainreq}, copied={copy_len}, \
+             total_len={}, preview={preview_escaped:?}",
+            utf16.len()
+        ));
+
         unsafe {
             if !pchplain.is_null() && copy_len > 0 {
                 std::ptr::copy_nonoverlapping(slice.as_ptr(), pchplain.0, copy_len);
@@ -340,6 +461,7 @@ impl ITextStoreACP_Impl for TextStore_Impl {
     ) -> Result<TS_TEXTCHANGE> {
         let slice = unsafe { std::slice::from_raw_parts(pchtext.0, cch as usize) };
         let text = String::from_utf16_lossy(slice);
+        tsf_log(&format!("SetText: start={acpstart}, end={acpend}, text={text:?}"));
 
         {
             let mut comp = self.composition.lock().unwrap();
@@ -406,6 +528,16 @@ impl ITextStoreACP_Impl for TextStore_Impl {
         pacpend: *mut i32,
         pchange: *mut TS_TEXTCHANGE,
     ) -> Result<()> {
+        let query_only = dwflags & TF_IAS_QUERYONLY.0 != 0;
+        let preview_text = if cch > 0 && !pchtext.0.is_null() {
+            let s = unsafe { std::slice::from_raw_parts(pchtext.0, cch as usize) };
+            String::from_utf16_lossy(s)
+        } else {
+            String::new()
+        };
+        tsf_log(&format!(
+            "InsertTextAtSelection: query_only={query_only}, cch={cch}, text={preview_text:?}"
+        ));
         let (composing, preedit_len) = {
             let comp = self.composition.lock().unwrap();
             (comp.composing, comp.preedit.encode_utf16().count() as i32)
@@ -488,6 +620,7 @@ impl ITextStoreACP_Impl for TextStore_Impl {
     fn GetEndACP(&self) -> Result<i32> {
         let text = self.get_text_content();
         let len: usize = text.encode_utf16().count();
+        tsf_log(&format!("GetEndACP: {len}"));
         Ok(len as i32)
     }
 
@@ -548,6 +681,11 @@ impl ITextStoreACP_Impl for TextStore_Impl {
             rect.top = top_left.y;
             rect.right = bottom_right.x;
             rect.bottom = bottom_right.y;
+            tsf_log(&format!(
+                "GetTextExt: start={acpstart}, end={acpend}, composing={composing}, \
+                 rect=({},{},{},{})",
+                rect.left, rect.top, rect.right, rect.bottom
+            ));
             *prc = rect;
             *pfclipped = FALSE;
         }
@@ -581,6 +719,7 @@ pub struct TsfContext {
     pub shared_sink: Arc<Mutex<SharedSink>>,
     pub composition: Arc<Mutex<CompositionState>>,
     app: Arc<Mutex<App>>,
+    retain_until: Arc<Mutex<Option<std::time::Instant>>>,
     _composition_sink_cookie: u32,
 }
 
@@ -604,6 +743,14 @@ impl TsfContext {
         // composition 中は通知しない（preedit が消えてしまうため）
         if self.is_composing() {
             return;
+        }
+
+        // スナップショット保持中は通知しない（交ぜ書き変換のため stale データを維持）
+        {
+            let retain = self.retain_until.lock().unwrap();
+            if matches!(*retain, Some(deadline) if std::time::Instant::now() < deadline) {
+                return;
+            }
         }
 
         // ロックを先にドロップしてからコールバック（デッドロック防止）
@@ -636,6 +783,8 @@ pub fn setup_tsf(
     app: Arc<Mutex<App>>,
     hwnd: HWND,
 ) -> Result<TsfContext> {
+    tsf_log("setup_tsf: start");
+
     let thread_mgr: ITfThreadMgr = unsafe {
         windows::Win32::System::Com::CoCreateInstance(
             &CLSID_TF_ThreadMgr,
@@ -643,18 +792,24 @@ pub fn setup_tsf(
             windows::Win32::System::Com::CLSCTX_INPROC_SERVER,
         )?
     };
+    tsf_log("setup_tsf: CoCreateInstance OK");
 
     let client_id = unsafe { thread_mgr.Activate()? };
+    tsf_log(&format!("setup_tsf: Activate OK, client_id={client_id}"));
+
     let doc_mgr = unsafe { thread_mgr.CreateDocumentMgr()? };
+    tsf_log("setup_tsf: CreateDocumentMgr OK");
 
     #[allow(clippy::arc_with_non_send_sync)] // COM オブジェクトは Send/Sync ではないが Arc<Mutex> で保護
     let shared_sink = Arc::new(Mutex::new(SharedSink { sink: None, mask: 0 }));
     let composition = Arc::new(Mutex::new(CompositionState::new()));
+    let retain_until: Arc<Mutex<Option<std::time::Instant>>> = Arc::new(Mutex::new(None));
     let text_store = TextStore::new(
         Arc::clone(&app),
         hwnd,
         Arc::clone(&shared_sink),
         Arc::clone(&composition),
+        Arc::clone(&retain_until),
     );
     let text_store_unk: IUnknown = text_store.into();
 
@@ -663,32 +818,44 @@ pub fn setup_tsf(
     let mut composition_sink_cookie = 0u32;
     unsafe {
         doc_mgr.CreateContext(client_id, 0, &text_store_unk, &mut context, &mut edit_cookie)?;
+        tsf_log(&format!("setup_tsf: CreateContext OK, edit_cookie={edit_cookie}"));
+
         if let Some(ref ctx) = context {
             let source: ITfSource = ctx.cast()?;
             // CONNECT_E_ADVISELIMIT: CreateContext 時に TSF が TextStore の
             // ITfContextOwnerCompositionSink を自動登録済みの場合があるため、
             // エラーは無視する。
-            if let Ok(cookie) = source.AdviseSink(
+            match source.AdviseSink(
                 &ITfContextOwnerCompositionSink::IID,
                 &text_store_unk,
             ) {
-                composition_sink_cookie = cookie;
+                Ok(cookie) => {
+                    composition_sink_cookie = cookie;
+                    tsf_log(&format!("setup_tsf: AdviseSink OK, cookie={cookie}"));
+                }
+                Err(e) => {
+                    tsf_log(&format!("setup_tsf: AdviseSink failed (expected if auto-registered): 0x{:08x}", e.code().0));
+                }
             }
 
             doc_mgr.Push(ctx)?;
+            tsf_log("setup_tsf: Push OK");
         }
         thread_mgr.SetFocus(&doc_mgr)?;
+        tsf_log("setup_tsf: SetFocus OK");
     }
 
     // ウィンドウにドキュメントマネージャを関連付け。
     // WM_SETFOCUS 時に TSF が自動的に SetFocus を呼び出し、
     // IME (rtry 等) が ITextStoreACP にアクセスできるようにする。
-    let _ = unsafe { thread_mgr.AssociateFocus(hwnd, &doc_mgr) };
+    let assoc_result = unsafe { thread_mgr.AssociateFocus(hwnd, &doc_mgr) };
+    tsf_log(&format!("setup_tsf: AssociateFocus result={assoc_result:?}"));
 
     // ITfKeystrokeMgr を取得。メッセージループで TSF にキーをルーティングするために必要。
     // これがないと CUAS が IMM32 互換パスにフォールバックし、MS IME の composition が
     // ITextStoreACP 経由ではなく WM_IME_COMPOSITION 経由になる。
     let keystroke_mgr: ITfKeystrokeMgr = thread_mgr.cast()?;
+    tsf_log("setup_tsf: complete (all steps succeeded)");
 
     Ok(TsfContext {
         thread_mgr,
@@ -697,6 +864,7 @@ pub fn setup_tsf(
         shared_sink,
         composition,
         app,
+        retain_until,
         _composition_sink_cookie: composition_sink_cookie,
     })
 }
