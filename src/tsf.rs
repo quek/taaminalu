@@ -260,7 +260,7 @@ impl ITfContextOwnerCompositionSink_Impl for TextStore_Impl {
             base_cursor_acp: virtual_cursor as usize,
         });
         *self.retain_until.lock().unwrap() =
-            Some(std::time::Instant::now() + std::time::Duration::from_millis(3000));
+            Some(std::time::Instant::now() + std::time::Duration::from_secs(30));
         tsf_log(&format!(
             "OnEndComposition: snapshot retained (cursor={})",
             virtual_cursor
