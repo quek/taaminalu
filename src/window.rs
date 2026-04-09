@@ -130,6 +130,9 @@ fn get_preedit(hwnd: HWND) -> String {
     with_tsf(hwnd, |ctx| ctx.preedit()).unwrap_or_default()
 }
 
+/// 遅延 PTY 書き込みデータの消費位置
+static DEFERRED_PTY_OFFSET: OnceLock<Mutex<usize>> = OnceLock::new();
+
 /// composition 終了時の PTY 書き込みを遅延実行する。
 /// OnEndComposition は TSF の RequestLock/OnLockGranted コールバック内で呼ばれるため、
 /// その中で write_pty すると ConPTY エコー→画面再描画のタイミング問題が起きる。
@@ -137,8 +140,46 @@ fn get_preedit(hwnd: HWND) -> String {
 pub fn post_deferred_pty_write(hwnd: HWND, data: Vec<u8>) {
     let store = DEFERRED_PTY_DATA.get_or_init(|| Mutex::new(Vec::new()));
     *store.lock().unwrap() = data;
+    *DEFERRED_PTY_OFFSET.get_or_init(|| Mutex::new(0)).lock().unwrap() = 0;
     unsafe {
         let _ = PostMessageW(Some(hwnd), WM_DEFERRED_PTY_WRITE, WPARAM(0), LPARAM(0));
+    }
+}
+
+/// 遅延 PTY 書き込みバッファから1チャンクを送信する。
+/// バックスペース(\x7f)は1個ずつ50ms間隔で送信（ConPTY の制約）。
+/// テキスト部分はまとめて送信。
+fn send_deferred_pty_chunk(hwnd: HWND) {
+    let store = DEFERRED_PTY_DATA.get_or_init(|| Mutex::new(Vec::new()));
+    let offset_store = DEFERRED_PTY_OFFSET.get_or_init(|| Mutex::new(0));
+    let data = store.lock().unwrap();
+    let mut offset = offset_store.lock().unwrap();
+
+    if *offset >= data.len() {
+        return;
+    }
+
+    if data[*offset] == 0x7f {
+        // バックスペース1個を送信
+        if let Some(app) = get_app(hwnd) {
+            let app = app.lock().unwrap();
+            let _ = app.write_pty(&[0x7f]);
+        }
+        *offset += 1;
+        // まだデータが残っていればタイマーで次のチャンク
+        if *offset < data.len() {
+            unsafe {
+                use windows::Win32::UI::WindowsAndMessaging::SetTimer;
+                SetTimer(Some(hwnd), TIMER_ID_DEFERRED_PTY, 50, None);
+            }
+        }
+    } else {
+        // テキスト部分を一括送信
+        if let Some(app) = get_app(hwnd) {
+            let app = app.lock().unwrap();
+            let _ = app.write_pty(&data[*offset..]);
+        }
+        *offset = data.len();
     }
 }
 
@@ -680,32 +721,7 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_DEFERRED_PTY_WRITE => {
-            let data = {
-                let store = DEFERRED_PTY_DATA.get_or_init(|| Mutex::new(Vec::new()));
-                std::mem::take(&mut *store.lock().unwrap())
-            };
-            if !data.is_empty()
-                && let Some(app) = get_app(hwnd)
-            {
-                // バックスペースを含む場合は 1 バイトだけ送信し、
-                // 残りは WM_TIMER (50ms後) で再送信。
-                // ConPTY/シェルがバックスペースのエコーを処理する時間が必要。
-                let has_bs = data.first() == Some(&0x7f);
-                if has_bs && data.len() > 1 {
-                    let app = app.lock().unwrap();
-                    let _ = app.write_pty(&[0x7f]);
-                    drop(app);
-                    let store = DEFERRED_PTY_DATA.get_or_init(|| Mutex::new(Vec::new()));
-                    *store.lock().unwrap() = data[1..].to_vec();
-                    unsafe {
-                        use windows::Win32::UI::WindowsAndMessaging::SetTimer;
-                        SetTimer(Some(hwnd), TIMER_ID_DEFERRED_PTY, 50, None);
-                    }
-                } else {
-                    let app = app.lock().unwrap();
-                    let _ = app.write_pty(&data);
-                }
-            }
+            send_deferred_pty_chunk(hwnd);
             LRESULT(0)
         }
         WM_PTY_OUTPUT => {
@@ -745,29 +761,7 @@ unsafe extern "system" fn wnd_proc(
                 use windows::Win32::UI::WindowsAndMessaging::KillTimer;
                 let _ = KillTimer(Some(hwnd), TIMER_ID_DEFERRED_PTY);
             }
-            let data = {
-                let store = DEFERRED_PTY_DATA.get_or_init(|| Mutex::new(Vec::new()));
-                std::mem::take(&mut *store.lock().unwrap())
-            };
-            if !data.is_empty() {
-                // まだバックスペースが残っている場合は再度タイマーで遅延
-                let has_bs = data.first() == Some(&0x7f);
-                if has_bs && data.len() > 1 {
-                    if let Some(app) = get_app(hwnd) {
-                        let app = app.lock().unwrap();
-                        let _ = app.write_pty(&[0x7f]);
-                    }
-                    let store = DEFERRED_PTY_DATA.get_or_init(|| Mutex::new(Vec::new()));
-                    *store.lock().unwrap() = data[1..].to_vec();
-                    unsafe {
-                        use windows::Win32::UI::WindowsAndMessaging::SetTimer;
-                        SetTimer(Some(hwnd), TIMER_ID_DEFERRED_PTY, 50, None);
-                    }
-                } else if let Some(app) = get_app(hwnd) {
-                    let app = app.lock().unwrap();
-                    let _ = app.write_pty(&data);
-                }
-            }
+            send_deferred_pty_chunk(hwnd);
             LRESULT(0)
         }
         WM_DESTROY => {

@@ -376,6 +376,7 @@ impl ITextStoreACP_Impl for TextStore_Impl {
         } else {
             (acpend as usize).min(utf16.len())
         };
+        let end = end.max(start); // start > end でのパニックを防止
 
         let slice = &utf16[start..end];
         let copy_len = slice.len().min(cchplainreq as usize);
