@@ -35,6 +35,12 @@ fn has_modifiers(mods: &Modifiers) -> bool {
 
 /// 特殊キー → VT エスケープシーケンス (修飾キー対応)
 pub fn build_key_sequence(vk: VIRTUAL_KEY, mods: &Modifiers) -> Option<Vec<u8>> {
+    // Shift+Tab: CBT (Cursor Backward Tabulation)
+    // 修飾なし Tab は WM_CHAR で \t として処理されるためここでは扱わない
+    if vk == VK_TAB && mods.shift && !mods.ctrl && !mods.alt {
+        return Some(b"\x1b[Z".to_vec());
+    }
+
     // Backspace: 修飾キー対応
     if vk == VK_BACK {
         let mut seq = Vec::new();
@@ -141,5 +147,34 @@ fn fkey_csi(code: u8, mp: u8, has_mods: bool) -> Vec<u8> {
         format!("\x1b[{};{}~", code, mp).into_bytes()
     } else {
         format!("\x1b[{}~", code).into_bytes()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn m(shift: bool, alt: bool, ctrl: bool) -> Modifiers {
+        Modifiers { shift, alt, ctrl }
+    }
+
+    #[test]
+    fn shift_tab_は_cbt_を返す() {
+        let seq = build_key_sequence(VK_TAB, &m(true, false, false));
+        assert_eq!(seq.as_deref(), Some(b"\x1b[Z".as_slice()));
+    }
+
+    #[test]
+    fn 修飾なし_tab_は_none_を返す() {
+        // 修飾なし Tab は WM_CHAR で \t (0x09) として処理されるため None を返す
+        let seq = build_key_sequence(VK_TAB, &m(false, false, false));
+        assert_eq!(seq, None);
+    }
+
+    #[test]
+    fn ctrl_tab_は_none_を返す() {
+        // Ctrl+Tab は WM_CHAR で処理されるため build_key_sequence は None を返す
+        let seq = build_key_sequence(VK_TAB, &m(false, false, true));
+        assert_eq!(seq, None);
     }
 }

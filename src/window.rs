@@ -492,35 +492,9 @@ unsafe extern "system" fn wnd_proc(
             let vk = VIRTUAL_KEY(wparam.0 as u16);
             let mods = get_modifiers();
 
-            // IME composition 中はキー入力を IME に委ねる（タブ操作以外）
+            // IME composition 中はキー入力を IME に委ねる（Ctrl 修飾で中断可能）
             if is_composing(hwnd) && !mods.ctrl {
                 return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
-            }
-
-            // タブ操作ショートカット
-            if mods.ctrl && mods.shift {
-                match vk {
-                    VK_T => {
-                        show_new_tab_menu(hwnd);
-                        return LRESULT(0);
-                    }
-                    VK_W => {
-                        close_active_tab(hwnd);
-                        return LRESULT(0);
-                    }
-                    VK_TAB => {
-                        // Ctrl+Shift+Tab: 前のタブ
-                        switch_tab_relative(hwnd, -1);
-                        return LRESULT(0);
-                    }
-                    _ => {}
-                }
-            }
-
-            // Ctrl+Tab: 次のタブ
-            if mods.ctrl && !mods.shift && vk == VK_TAB {
-                switch_tab_relative(hwnd, 1);
-                return LRESULT(0);
             }
 
             // 特殊キーのエスケープシーケンス
@@ -935,18 +909,6 @@ fn create_new_tab(hwnd: HWND, shell: ShellType) {
     repaint(hwnd);
 }
 
-fn close_active_tab(hwnd: HWND) {
-    let app = match get_app(hwnd) {
-        Some(a) => a,
-        None => return,
-    };
-    let index = {
-        let app_lock = app.lock().unwrap();
-        app_lock.active_tab
-    };
-    close_tab_at(hwnd, index);
-}
-
 fn close_tab_at(hwnd: HWND, index: usize) {
     let app = match get_app(hwnd) {
         Some(a) => a,
@@ -961,23 +923,6 @@ fn close_tab_at(hwnd: HWND, index: usize) {
     } else {
         repaint(hwnd);
     }
-}
-
-fn switch_tab_relative(hwnd: HWND, delta: i32) {
-    let app = match get_app(hwnd) {
-        Some(a) => a,
-        None => return,
-    };
-    let mut app_lock = app.lock().unwrap();
-    let count = app_lock.tab_count();
-    if count <= 1 {
-        return;
-    }
-    let current = app_lock.active_tab as i32;
-    let next = ((current + delta) % count as i32 + count as i32) as usize % count;
-    app_lock.switch_tab(next);
-    drop(app_lock);
-    repaint(hwnd);
 }
 
 // --- クリップボード ---
