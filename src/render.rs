@@ -16,7 +16,7 @@ use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL,
     DWRITE_FONT_STYLE_ITALIC, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_BOLD,
     DWRITE_FONT_WEIGHT_REGULAR, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
-    DWRITE_TEXT_ALIGNMENT_CENTER, IDWriteFactory, IDWriteTextFormat,
+    DWRITE_TEXT_ALIGNMENT_CENTER, IDWriteFactory, IDWriteTextFormat, IDWriteTextLayout,
 };
 use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, PAINTSTRUCT};
 
@@ -192,6 +192,11 @@ pub struct Renderer {
     pub cell_width: f32,
     pub cell_height: f32,
     brush_cache: RefCell<HashMap<u32, ID2D1SolidColorBrush>>,
+    /// グリフ単位の TextLayout キャッシュ。キー = (文字, bold, italic)。
+    /// 毎フレームの CreateTextLayout（COM 割当）を排除する。
+    /// セルサイズ・フォントは不変で、TextLayout は DirectWrite 側のオブジェクト
+    /// （レンダーターゲット非依存）なので resize でのクリアは不要。
+    glyph_cache: RefCell<HashMap<(char, bool, bool), IDWriteTextLayout>>,
 }
 
 /// DirectWrite TextFormat を作成するヘルパー
@@ -293,6 +298,7 @@ impl Renderer {
             text_format, bold_text_format, italic_text_format, bold_italic_text_format,
             tab_text_format, dotted_stroke, dashed_stroke, cell_width, cell_height,
             brush_cache: RefCell::new(HashMap::new()),
+            glyph_cache: RefCell::new(HashMap::new()),
         })
     }
 
@@ -555,18 +561,8 @@ impl Renderer {
                     if !is_hidden && c != ' ' && c != '\0' {
                         let fg = if is_cursor { BG_COLOR } else { cell_fg };
 
-                        // BOLD/ITALIC に応じた TextFormat を選択
-                        let format = match (is_bold, is_italic) {
-                            (true, true) => &self.bold_italic_text_format,
-                            (true, false) => &self.bold_text_format,
-                            (false, true) => &self.italic_text_format,
-                            (false, false) => &self.text_format,
-                        };
-
-                        let text = [c as u16];
-                        if let Ok(layout) = self.dwrite_factory.CreateTextLayout(
-                            &text, format, cell_w, cell_h,
-                        )
+                        // キャッシュ済みグリフ TextLayout を再利用（毎フレームの CreateTextLayout を排除）
+                        if let Some(layout) = self.get_glyph_layout(c, is_bold, is_italic)
                             && let Some(brush) = self.get_brush(&fg) {
                                 self.rt.DrawTextLayout(
                                     windows_numerics::Vector2 { X: x, Y: y },
@@ -625,6 +621,31 @@ impl Renderer {
         let brush = unsafe { self.rt.CreateSolidColorBrush(color, None).ok()? };
         cache.insert(key, brush.clone());
         Some(brush)
+    }
+
+    /// (文字, bold, italic) からキャッシュ済みグリフ TextLayout を取得（なければ生成）。
+    /// 単一グリフ・leading 揃えなので、レイアウト枠はセルサイズ固定で実セル幅と
+    /// 無関係（全角グリフは枠をはみ出すが CLIP 無しのため欠けない）。
+    fn get_glyph_layout(&self, c: char, bold: bool, italic: bool) -> Option<IDWriteTextLayout> {
+        let key = (c, bold, italic);
+        let mut cache = self.glyph_cache.borrow_mut();
+        if let Some(layout) = cache.get(&key) {
+            return Some(layout.clone());
+        }
+        let format = match (bold, italic) {
+            (true, true) => &self.bold_italic_text_format,
+            (true, false) => &self.bold_text_format,
+            (false, true) => &self.italic_text_format,
+            (false, false) => &self.text_format,
+        };
+        let text = [c as u16];
+        let layout = unsafe {
+            self.dwrite_factory
+                .CreateTextLayout(&text, format, self.cell_width, self.cell_height)
+                .ok()?
+        };
+        cache.insert(key, layout.clone());
+        Some(layout)
     }
 
     /// 波線（undercurl）を描画
