@@ -78,14 +78,14 @@ fn save_geometry(hwnd: HWND) {
     }
 }
 
-/// カスタムメッセージ: PTY からデータ受信で再描画要求 (WPARAM = TabId)
-pub const WM_PTY_OUTPUT: u32 = WM_USER + 1;
 /// カスタムメッセージ: タブの PTY プロセスが終了 (WPARAM = TabId)
 pub const WM_TAB_CLOSED: u32 = WM_USER + 2;
 /// カスタムメッセージ: 遅延 PTY 書き込み (composition 終了後)
 pub const WM_DEFERRED_PTY_WRITE: u32 = WM_USER + 3;
 /// タイマー ID: バックスペース遅延送信用
 const TIMER_ID_DEFERRED_PTY: usize = 1;
+/// タイマー ID: フレーム駆動再描画用（16ms ≒ 60fps で再描画/TSF通知を合体）
+const TIMER_ID_FRAME: usize = 2;
 
 // シェル選択メニュー ID
 const MENU_ID_WSL_DEFAULT: u32 = 1;
@@ -343,14 +343,8 @@ pub(crate) fn start_pty_reader(
                     let mut app_lock = app.lock().unwrap();
                     app_lock.process_pty_output_for_tab(tab_id, &buf[..n]);
                     drop(app_lock);
-                    unsafe {
-                        let _ = PostMessageW(
-                            Some(hwnd),
-                            WM_PTY_OUTPUT,
-                            WPARAM(tab_id as usize),
-                            LPARAM(0),
-                        );
-                    }
+                    // 再描画は UI スレッドの 16ms フレームタイマーが dirty を見て合体実行する。
+                    // ここで PostMessage はしない（大量出力時のメッセージ氾濫を防ぐ）。
                 }
                 Err(_) => break,
             }
@@ -407,6 +401,9 @@ unsafe extern "system" fn wnd_proc(
             let app_ptr = cs.lpCreateParams as *mut Arc<Mutex<App>>;
             unsafe {
                 SetWindowLongPtrW(hwnd, GWLP_USERDATA, app_ptr as isize);
+                // フレーム駆動の再描画タイマーを起動（16ms ≒ 60fps）。
+                // PTY出力ごとの即時再描画ではなく、このタイマーが dirty を見て合体描画する。
+                let _ = SetTimer(Some(hwnd), TIMER_ID_FRAME, 16, None);
             }
             LRESULT(0)
         }
@@ -698,17 +695,13 @@ unsafe extern "system" fn wnd_proc(
             send_deferred_pty_chunk(hwnd);
             LRESULT(0)
         }
-        WM_PTY_OUTPUT => {
-            let tab_id = wparam.0 as TabId;
-            // アクティブタブの出力なら再描画 + TSF通知
-            let is_active = {
-                let app = get_app(hwnd);
-                app.map(|a| {
-                    let app = a.lock().unwrap();
-                    app.active_tab_id() == tab_id
-                }).unwrap_or(false)
-            };
-            if is_active {
+        WM_TIMER if wparam.0 == TIMER_ID_FRAME => {
+            // dirty が立っていれば再描画 + TSF通知を1回だけ実行（PTY出力を 60fps に合体）。
+            // dirty クリアのためだけにロックするので、再描画は必ずロック解放後に行う。
+            let needs_repaint = get_app(hwnd)
+                .map(|app| std::mem::replace(&mut app.lock().unwrap().dirty, false))
+                .unwrap_or(false);
+            if needs_repaint {
                 repaint(hwnd);
             }
             LRESULT(0)
@@ -741,6 +734,7 @@ unsafe extern "system" fn wnd_proc(
         WM_DESTROY => {
             save_geometry(hwnd);
             unsafe {
+                let _ = KillTimer(Some(hwnd), TIMER_ID_FRAME);
                 let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut Arc<Mutex<App>>;
                 if !ptr.is_null() {
                     drop(Box::from_raw(ptr));

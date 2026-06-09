@@ -83,6 +83,10 @@ pub struct App {
     pub drag_origin: Option<(i16, i16, usize, usize)>,
     /// 直前のクリック情報（ダブルクリック検出用: 時刻, row, col）
     pub last_click: Option<(Instant, usize, usize)>,
+    /// アクティブタブに未描画の更新があるか。
+    /// PTY リーダーがパース用ロック内で立て、UI スレッドの 16ms フレームタイマーが
+    /// check-and-clear して再描画する（出力を 60fps に合体）。
+    pub dirty: bool,
 }
 
 impl App {
@@ -95,6 +99,7 @@ impl App {
             selection: None,
             drag_origin: None,
             last_click: None,
+            dirty: false,
         })
     }
 
@@ -147,6 +152,10 @@ impl App {
     pub fn process_pty_output_for_tab(&mut self, tab_id: TabId, data: &[u8]) {
         if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
             tab.process_pty_output(data);
+        }
+        // アクティブタブの出力なら再描画フラグを立てる（背景タブは描画しない＝既存挙動）
+        if self.active_tab_id() == tab_id {
+            self.dirty = true;
         }
     }
 
