@@ -22,14 +22,27 @@ pub struct CompositionState {
     /// SetText(acpstart, acpend) で acpend > acpstart なら置換操作。
     /// OnEndComposition でこの数だけバックスペースを送ってから確定テキストを送信する。
     pub chars_to_erase: usize,
+    /// 確定したがまだ PTY エコーで grid に反映されていない確定文字（エコー待ちオーバーレイ）。
+    /// grid のカーソル前 `pending_erase` 文字を `pending_text` で置換して IME に見せ、
+    /// grid にエコーされたら（reconcile_pending で検出）解除する。snapshot 凍結の代替。
+    pub pending_erase: usize,
+    pub pending_text: String,
 }
 
 impl CompositionState {
     fn new() -> Self {
-        Self { composing: false, preedit: String::new(), chars_to_erase: 0 }
+        Self {
+            composing: false,
+            preedit: String::new(),
+            chars_to_erase: 0,
+            pending_erase: 0,
+            pending_text: String::new(),
+        }
     }
 
-    /// OnStartComposition: composition 開始
+    /// OnStartComposition: composition 開始。
+    /// pending_text は維持する（直前の確定がエコー前なら、その上に新しい preedit を
+    /// 重ねて「ねこ」のような連続入力を正しく見せるため）。
     pub fn start(&mut self) {
         self.composing = true;
         self.chars_to_erase = 0;
@@ -75,11 +88,18 @@ impl CompositionState {
     }
 
     /// OnEndComposition: composition 終了。PTY に送るバイト列を返す。
+    /// 確定文字は「エコー待ちオーバーレイ」(pending_erase/pending_text) として保持し、
+    /// grid にエコーされるまで GetText に重ねて見せる（snapshot 凍結の代替）。
     pub fn end(&mut self) -> Vec<u8> {
         self.composing = false;
         let preedit = std::mem::take(&mut self.preedit);
         let erase = self.chars_to_erase;
         self.chars_to_erase = 0;
+
+        if !preedit.is_empty() {
+            self.pending_erase = erase;
+            self.pending_text = preedit.clone();
+        }
 
         let mut output = Vec::new();
         if !preedit.is_empty() {
@@ -89,14 +109,75 @@ impl CompositionState {
         }
         output
     }
+
+    /// grid のカーソル前テキストに確定文字（pending_text）が現れていたら、
+    /// エコー完了とみなしてオーバーレイを解除する。
+    pub fn reconcile_pending(&mut self, grid_before_cursor: &str) {
+        if self.pending_text.is_empty() {
+            return;
+        }
+        if grid_before_cursor.ends_with(&self.pending_text) {
+            self.pending_erase = 0;
+            self.pending_text.clear();
+        }
+    }
 }
 
-/// ロック中にバッファの一貫性を保つためのスナップショット。
-/// PTY リーダースレッドがロック中にバッファを更新しても、
-/// OnLockGranted 内の GetText/GetSelection は同じ状態を返す。
+/// grid（または snapshot）のテキスト・カーソルに、composition の pending（確定エコー
+/// 待ち）と preedit（変換中）を重ねた「仮想ドキュメント」を計算する。
+/// TextStore（ロック中スナップショット基準）と TsfContext（最新 grid 基準）の両方が使う。
+fn apply_overlays(base: &str, base_cursor: usize, comp: &CompositionState) -> (String, usize) {
+    let (t1, c1) = overlay_one(base, base_cursor, comp.pending_erase, &comp.pending_text);
+    if comp.composing {
+        overlay_one(&t1, c1, comp.chars_to_erase, &comp.preedit)
+    } else {
+        (t1, c1)
+    }
+}
+
+/// text のカーソル位置から erase 文字（UTF-16 単位）を削除し ins を挿入する。
+/// 戻り値は (新テキスト, 新カーソル UTF-16 ACP)。
+fn overlay_one(text: &str, cursor: usize, erase: usize, ins: &str) -> (String, usize) {
+    if erase == 0 && ins.is_empty() {
+        return (text.to_string(), cursor);
+    }
+    let utf16: Vec<u16> = text.encode_utf16().collect();
+    let pos = cursor.min(utf16.len());
+    let erase_start = pos.saturating_sub(erase);
+    let before = String::from_utf16_lossy(&utf16[..erase_start]);
+    let after = String::from_utf16_lossy(&utf16[pos..]);
+    let new_cursor = erase_start + ins.encode_utf16().count();
+    let mut s = String::with_capacity(before.len() + ins.len() + after.len());
+    s.push_str(&before);
+    s.push_str(ins);
+    s.push_str(&after);
+    (s, new_cursor)
+}
+
+/// 旧テキストと新テキストの差分範囲を UTF-16 ACP で算出（前方/後方スキャン、Chromium 方式）。
+/// 戻り値は (acpStart, acpOldEnd, acpNewEnd)。
+fn text_diff(old: &str, new: &str) -> (i32, i32, i32) {
+    let o: Vec<u16> = old.encode_utf16().collect();
+    let n: Vec<u16> = new.encode_utf16().collect();
+    let mut start = 0usize;
+    let min_len = o.len().min(n.len());
+    while start < min_len && o[start] == n[start] {
+        start += 1;
+    }
+    let (mut old_end, mut new_end) = (o.len(), n.len());
+    while old_end > start && new_end > start && o[old_end - 1] == n[new_end - 1] {
+        old_end -= 1;
+        new_end -= 1;
+    }
+    (start as i32, old_end as i32, new_end as i32)
+}
+
+/// ロック中にバッファの一貫性を保つためのスナップショット（1 ロック単位）。
+/// RequestLock で実画面から作成し OnLockGranted 中だけ有効。次のロックで作り直す。
+/// PTY リーダーがロック中にバッファを更新しても GetText/GetSelection は同じ状態を返す。
 struct LockSnapshot {
-    base_text: Arc<String>, // screen_text（preedit を含まない）。Arc で clone を軽量化。
-    base_cursor_acp: usize, // cursor_acp（preedit を含まない）
+    base_text: Arc<String>, // screen_text（pending/preedit を含まない素の grid）
+    base_cursor_acp: usize, // grid のカーソル ACP（pending/preedit を含まない）
 }
 
 /// TSF ITextStoreACP + ITfContextOwnerCompositionSink 実装
@@ -107,10 +188,8 @@ pub struct TextStore {
     shared_sink: Arc<Mutex<SharedSink>>,
     lock_flags: Mutex<u32>,
     composition: Arc<Mutex<CompositionState>>,
-    /// OnLockGranted 中のみ有効なスナップショット
+    /// OnLockGranted 中のみ有効な 1 ロック単位のスナップショット
     snapshot: Mutex<Option<LockSnapshot>>,
-    /// composition 終了後のスナップショット保持期限
-    retain_until: Arc<Mutex<Option<std::time::Instant>>>,
 }
 
 impl TextStore {
@@ -119,7 +198,6 @@ impl TextStore {
         hwnd: HWND,
         shared_sink: Arc<Mutex<SharedSink>>,
         composition: Arc<Mutex<CompositionState>>,
-        retain_until: Arc<Mutex<Option<std::time::Instant>>>,
     ) -> Self {
         Self {
             app,
@@ -128,7 +206,6 @@ impl TextStore {
             lock_flags: Mutex::new(0),
             composition,
             snapshot: Mutex::new(None),
-            retain_until,
         }
     }
 
@@ -141,32 +218,41 @@ impl TextStore {
         (Arc::new(app.screen_text()), app.cursor_acp())
     }
 
-    /// ターミナルバッファのテキスト（composition 中は preedit を含む仮想ドキュメント）
+    /// IME に見せる仮想ドキュメント（grid に pending と preedit を重ねたもの）
     fn get_text_content(&self) -> Arc<String> {
-        let preedit = self.composition.lock().unwrap().preedit.clone();
         let (base, cursor_acp) = self.base_text_and_cursor();
-        if preedit.is_empty() {
+        let comp = self.composition.lock().unwrap();
+        // pending も preedit も無ければ素の grid をそのまま返す（clone 回避）
+        if !comp.composing && comp.pending_text.is_empty() {
             return base;
         }
-        // カーソル位置に preedit を挿入した仮想ドキュメントを返す
-        let utf16: Vec<u16> = base.encode_utf16().collect();
-        let pos = cursor_acp.min(utf16.len());
-        let before = String::from_utf16_lossy(&utf16[..pos]);
-        let after = String::from_utf16_lossy(&utf16[pos..]);
-        Arc::new(format!("{}{}{}", before, preedit, after))
+        let (text, _) = apply_overlays(&base, cursor_acp, &comp);
+        Arc::new(text)
     }
 
-    /// カーソル ACP（composition 中は preedit 末尾を返す）
+    /// IME に見せるカーソル ACP（pending と preedit を重ねた後の末尾位置）
     fn cursor_to_acp(&self) -> i32 {
-        let preedit_len = self.composition.lock().unwrap().preedit.encode_utf16().count() as i32;
-        let (_, base_acp) = self.base_text_and_cursor();
-        (base_acp as i32).saturating_add(preedit_len)
+        let (base, base_acp) = self.base_text_and_cursor();
+        let comp = self.composition.lock().unwrap();
+        // オーバーレイが無ければ grid のカーソルそのもの（clone を避ける）
+        if !comp.composing && comp.pending_text.is_empty() {
+            return base_acp as i32;
+        }
+        let (_, cursor) = apply_overlays(&base, base_acp, &comp);
+        cursor as i32
     }
 
-    /// ターミナルバッファ上のカーソル ACP（preedit を含まない）
+    /// preedit の開始位置 ACP（pending は適用済み・preedit は含まない）。
+    /// SetText/InsertTextAtSelection が「変換中テキストの基準点」として使う。
     fn base_cursor_acp(&self) -> i32 {
-        let (_, base_acp) = self.base_text_and_cursor();
-        base_acp as i32
+        let (base, base_acp) = self.base_text_and_cursor();
+        let comp = self.composition.lock().unwrap();
+        // 確定エコー待ちが無ければ grid のカーソルそのもの（clone を避ける）
+        if comp.pending_text.is_empty() {
+            return base_acp as i32;
+        }
+        let (_, cursor) = overlay_one(&base, base_acp, comp.pending_erase, &comp.pending_text);
+        cursor as i32
     }
 
     fn invalidate(&self) {
@@ -196,11 +282,6 @@ impl ITfContextOwnerCompositionSink_Impl for TextStore_Impl {
         &self,
         _pcomposition: Ref<ITfCompositionView>,
     ) -> Result<BOOL> {
-        // 保持フラグをクリア（次の RequestLock 後に期限切れとして扱われる）。
-        // スナップショット自体は変更しない。保持スナップショットには前回の
-        // composition で確定した文字が bake-in されており、この上に新しい
-        // preedit を重ねることで「ねこ」のような連続入力が正しく見える。
-        *self.retain_until.lock().unwrap() = None;
         self.composition.lock().unwrap().start();
         Ok(TRUE)
     }
@@ -218,24 +299,14 @@ impl ITfContextOwnerCompositionSink_Impl for TextStore_Impl {
         &self,
         _pcomposition: Ref<ITfCompositionView>,
     ) -> Result<()> {
-        // preedit をクリアする前に、確定文字を含む仮想ドキュメントをキャプチャ。
-        // これにより、rtry が後で GetText を読んだとき確定済み文字が見える。
-        let virtual_text = self.get_text_content();
-        let virtual_cursor = self.cursor_to_acp();
-
+        // end() が確定文字を pending（エコー待ちオーバーレイ）として保持するので、
+        // rtry が直後に GetText しても確定済み文字が見える（snapshot 凍結は不要）。
         let output = self.composition.lock().unwrap().end();
         if !output.is_empty() {
             // TSF ロック中の直接 write_pty は ConPTY エコーのタイミング問題を起こすため、
             // PostMessage で遅延送信する。
             crate::window::post_deferred_pty_write(self.hwnd, output);
         }
-        // 確定文字を含むスナップショットを保持（交ぜ書き変換のため）
-        *self.snapshot.lock().unwrap() = Some(LockSnapshot {
-            base_text: virtual_text,
-            base_cursor_acp: virtual_cursor as usize,
-        });
-        *self.retain_until.lock().unwrap() =
-            Some(std::time::Instant::now() + std::time::Duration::from_secs(30));
         self.invalidate();
         Ok(())
     }
@@ -267,20 +338,23 @@ impl ITextStoreACP_Impl for TextStore_Impl {
     fn RequestLock(&self, dwlockflags: u32) -> Result<HRESULT> {
         let sink = self.shared_sink.lock().unwrap().sink.clone();
         if let Some(sink) = sink {
-            // 保持中 or composition 中はスナップショットを再利用
-            let retained = {
-                let retain = self.retain_until.lock().unwrap();
-                matches!(*retain, Some(deadline) if std::time::Instant::now() < deadline)
-            };
-            let composing = self.composition.lock().unwrap().composing;
-            if (retained || composing) && self.snapshot.lock().unwrap().is_some() {
-            } else {
+            // 実画面からこのロック専用のスナップショットを作る（凍結しない）。
+            // 同時に、確定文字が grid にエコー済みなら pending を解除する。
+            let (grid_text, grid_cursor) = {
                 let app = self.app.lock().unwrap();
-                *self.snapshot.lock().unwrap() = Some(LockSnapshot {
-                    base_text: Arc::new(app.screen_text()),
-                    base_cursor_acp: app.cursor_acp(),
-                });
+                (app.screen_text(), app.cursor_acp())
+            };
+            {
+                let mut comp = self.composition.lock().unwrap();
+                let utf16: Vec<u16> = grid_text.encode_utf16().collect();
+                let pos = grid_cursor.min(utf16.len());
+                let before = String::from_utf16_lossy(&utf16[..pos]);
+                comp.reconcile_pending(&before);
             }
+            *self.snapshot.lock().unwrap() = Some(LockSnapshot {
+                base_text: Arc::new(grid_text),
+                base_cursor_acp: grid_cursor,
+            });
 
             *self.lock_flags.lock().unwrap() = dwlockflags;
             let hr = unsafe {
@@ -288,16 +362,8 @@ impl ITextStoreACP_Impl for TextStore_Impl {
             };
             *self.lock_flags.lock().unwrap() = 0;
 
-            // 保持中 or composition 中はスナップショットを維持
-            let still_retained = {
-                let retain = self.retain_until.lock().unwrap();
-                matches!(*retain, Some(deadline) if std::time::Instant::now() < deadline)
-            };
-            let still_composing = self.composition.lock().unwrap().composing;
-            if !still_retained && !still_composing {
-                *self.snapshot.lock().unwrap() = None;
-                *self.retain_until.lock().unwrap() = None;
-            }
+            // ロックを抜けたらスナップショットは無効化（次のロックで作り直す）
+            *self.snapshot.lock().unwrap() = None;
 
             match hr {
                 Ok(()) => Ok(S_OK),
@@ -409,18 +475,16 @@ impl ITextStoreACP_Impl for TextStore_Impl {
         let slice = unsafe { std::slice::from_raw_parts(pchtext.0, cch as usize) };
         let text = String::from_utf16_lossy(slice);
 
-        {
-            let mut comp = self.composition.lock().unwrap();
-            if comp.composing {
-                let base_acp = self.base_cursor_acp();
-                comp.set_text(text, acpstart, acpend, base_acp);
-                drop(comp);
-                self.invalidate();
-            } else {
-                drop(comp);
-                let app = self.app.lock().unwrap();
-                let _ = app.write_pty(text.as_bytes());
-            }
+        let composing = self.composition.lock().unwrap().composing;
+        if composing {
+            // base_cursor_acp は内部で composition をロックするため、comp を保持したまま
+            // 呼ぶと同一スレッドで二重ロックしてデッドロックする。先にロック外で計算する。
+            let base_acp = self.base_cursor_acp();
+            self.composition.lock().unwrap().set_text(text, acpstart, acpend, base_acp);
+            self.invalidate();
+        } else {
+            let app = self.app.lock().unwrap();
+            let _ = app.write_pty(text.as_bytes());
         }
 
         Ok(TS_TEXTCHANGE {
@@ -649,7 +713,8 @@ pub struct TsfContext {
     pub shared_sink: Arc<Mutex<SharedSink>>,
     pub composition: Arc<Mutex<CompositionState>>,
     app: Arc<Mutex<App>>,
-    retain_until: Arc<Mutex<Option<std::time::Instant>>>,
+    /// 前回 IME に通知した (仮想ドキュメント, カーソル ACP)。差分通知の基準。
+    last_notified: Mutex<(String, i32)>,
     _composition_sink_cookie: u32,
 }
 
@@ -668,42 +733,63 @@ impl TsfContext {
         self.composition.lock().unwrap().preedit.clone()
     }
 
-    /// PTY出力後にテキスト変更を TSF シンクに通知
+    /// 画面更新後、テキスト/カーソルが実際に変化したぶんだけ TSF シンクに通知する。
+    /// ロック外（フレームタイマー等）から呼ばれる。Chromium tsf_text_store と同じ差分方式：
+    /// 前回通知値と比較し、変化が無ければ何も送らない。
     pub fn notify_change(&self) {
-        // composition 中は通知しない（preedit が消えてしまうため）
+        // composition 中は通知しない（preedit の最中に ACP が動くと変換が壊れる）
         if self.is_composing() {
             return;
         }
 
-        // スナップショット保持中は通知しない（交ぜ書き変換のため stale データを維持）
-        {
-            let retain = self.retain_until.lock().unwrap();
-            if matches!(*retain, Some(deadline) if std::time::Instant::now() < deadline) {
-                return;
-            }
-        }
-
-        // ロックを先にドロップしてからコールバック（デッドロック防止）
         let (sink, mask) = {
             let shared = self.shared_sink.lock().unwrap();
             (shared.sink.clone(), shared.mask)
         };
-        if let Some(sink) = sink {
-            if mask & TS_AS_TEXT_CHANGE != 0 {
-                let end_acp = {
-                    let app = self.app.lock().unwrap();
-                    app.screen_text_utf16_len() as i32
-                };
-                let change = TS_TEXTCHANGE {
-                    acpStart: 0,
-                    acpOldEnd: end_acp,
-                    acpNewEnd: end_acp,
-                };
+        let Some(sink) = sink else { return };
+
+        // 現在の仮想ドキュメント（grid + pending）とカーソルを計算
+        let (cur_text, cur_cursor) = {
+            let app = self.app.lock().unwrap();
+            let comp = self.composition.lock().unwrap();
+            let base = app.screen_text();
+            let cursor = app.cursor_acp();
+            // オーバーレイが無ければ素の grid をそのまま使う（clone を避ける）
+            if !comp.composing && comp.pending_text.is_empty() {
+                (base, cursor)
+            } else {
+                apply_overlays(&base, cursor, &comp)
+            }
+        };
+        let cur_cursor = cur_cursor as i32;
+
+        let mut last = self.last_notified.lock().unwrap();
+        // テキストが変わったぶんだけ最小レンジで通知
+        if mask & TS_AS_TEXT_CHANGE != 0 && last.0 != cur_text {
+            let (start, old_end, new_end) = text_diff(&last.0, &cur_text);
+            if start != old_end || start != new_end {
+                let change = TS_TEXTCHANGE { acpStart: start, acpOldEnd: old_end, acpNewEnd: new_end };
                 unsafe { let _ = sink.OnTextChange(TEXT_STORE_TEXT_CHANGE_FLAGS(0), &change); }
             }
-            if mask & TS_AS_SEL_CHANGE != 0 {
-                unsafe { let _ = sink.OnSelectionChange(); }
-            }
+        }
+        // カーソルが動いたときだけ選択変更を通知
+        if mask & TS_AS_SEL_CHANGE != 0 && last.1 != cur_cursor {
+            unsafe { let _ = sink.OnSelectionChange(); }
+        }
+        *last = (cur_text, cur_cursor);
+    }
+
+    /// テキスト/カーソルの画面座標が変わったとき（スクロール・リサイズ・移動）に
+    /// レイアウト変更を通知し、IME に GetTextExt を再取得させ候補位置を追従させる。
+    pub fn notify_layout_change(&self) {
+        let (sink, mask) = {
+            let shared = self.shared_sink.lock().unwrap();
+            (shared.sink.clone(), shared.mask)
+        };
+        if let Some(sink) = sink
+            && mask & TS_AS_LAYOUT_CHANGE != 0
+        {
+            unsafe { let _ = sink.OnLayoutChange(TS_LC_CHANGE, 1); }
         }
     }
 }
@@ -713,7 +799,6 @@ pub fn setup_tsf(
     app: Arc<Mutex<App>>,
     hwnd: HWND,
 ) -> Result<TsfContext> {
-
     let thread_mgr: ITfThreadMgr = unsafe {
         windows::Win32::System::Com::CoCreateInstance(
             &CLSID_TF_ThreadMgr,
@@ -729,13 +814,11 @@ pub fn setup_tsf(
     #[allow(clippy::arc_with_non_send_sync)] // COM オブジェクトは Send/Sync ではないが Arc<Mutex> で保護
     let shared_sink = Arc::new(Mutex::new(SharedSink { sink: None, mask: 0 }));
     let composition = Arc::new(Mutex::new(CompositionState::new()));
-    let retain_until: Arc<Mutex<Option<std::time::Instant>>> = Arc::new(Mutex::new(None));
     let text_store = TextStore::new(
         Arc::clone(&app),
         hwnd,
         Arc::clone(&shared_sink),
         Arc::clone(&composition),
-        Arc::clone(&retain_until),
     );
     let text_store_unk: IUnknown = text_store.into();
 
@@ -779,7 +862,7 @@ pub fn setup_tsf(
         shared_sink,
         composition,
         app,
-        retain_until,
+        last_notified: Mutex::new((String::new(), -1)),
         _composition_sink_cookie: composition_sink_cookie,
     })
 }
@@ -920,5 +1003,61 @@ mod tests {
         // "日本" の後に spacer 文字が混じっていないこと
         let first_line: String = text.lines().next().unwrap_or("").chars().take(4).collect();
         assert!(first_line.starts_with("日本"), "先頭が '日本' であるべき: {:?}", first_line);
+    }
+
+    // --- オーバーレイ（pending / preedit を grid に重ねる）---
+
+    #[test]
+    fn test_overlay_oneは末尾に挿入する() {
+        // "ab" のカーソル末尾(2) に erase=0 で "X" 挿入 → "abX"
+        assert_eq!(overlay_one("ab", 2, 0, "X"), ("abX".into(), 3));
+    }
+
+    #[test]
+    fn test_overlay_oneは置換する() {
+        // "ねこ" のカーソル末尾(2) で erase=2, "猫" → "猫"（交ぜ書き変換の確定）
+        assert_eq!(overlay_one("ねこ", 2, 2, "猫"), ("猫".into(), 1));
+    }
+
+    #[test]
+    fn test_確定pendingは挿入でなく置換で重なる() {
+        // 「ねこ猫」バグ再発防止: grid "ねこ" に pending(erase=2,"猫") → "猫"
+        let mut comp = CompositionState::new();
+        comp.pending_erase = 2;
+        comp.pending_text = "猫".into();
+        let (text, cursor) = apply_overlays("ねこ", 2, &comp);
+        assert_eq!(text, "猫", "確定 overlay は挿入でなく置換（'ねこ猫' にならない）");
+        assert_eq!(cursor, 1);
+    }
+
+    #[test]
+    fn test_preeditは確定pendingの上に乗る() {
+        // 連続入力: grid 空 + pending "ね"(エコー前) + preedit "こ" → "ねこ"
+        let mut comp = CompositionState::new();
+        comp.pending_text = "ね".into();
+        comp.composing = true;
+        comp.preedit = "こ".into();
+        assert_eq!(apply_overlays("", 0, &comp), ("ねこ".into(), 2));
+    }
+
+    #[test]
+    fn test_reconcile_pendingはエコー検出で解除する() {
+        let mut comp = CompositionState::new();
+        comp.pending_text = "ね".into();
+        // grid のカーソル前にまだ確定文字が無い → 維持
+        comp.reconcile_pending("> ");
+        assert_eq!(comp.pending_text, "ね", "エコー前は維持");
+        // grid のカーソル前に "ね" が現れた → 解除
+        comp.reconcile_pending("> ね");
+        assert_eq!(comp.pending_text, "", "エコー後は解除");
+        assert_eq!(comp.pending_erase, 0);
+    }
+
+    #[test]
+    fn test_text_diffは最小レンジを返す() {
+        assert_eq!(text_diff("text", "Text"), (0, 1, 1)); // 先頭 t→T 置換
+        assert_eq!(text_diff("text", "tex"), (3, 4, 3));  // 末尾 t 削除
+        assert_eq!(text_diff("text", "teaxt"), (2, 2, 3)); // e,x 間に a 挿入
+        assert_eq!(text_diff("abc", "abc"), (3, 3, 3));   // 変化なし（呼び出し側で送らない）
     }
 }

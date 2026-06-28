@@ -122,6 +122,10 @@ fn notify_tsf_change(hwnd: HWND) {
     with_tsf(hwnd, |ctx| ctx.notify_change());
 }
 
+fn notify_tsf_layout_change(hwnd: HWND) {
+    with_tsf(hwnd, |ctx| ctx.notify_layout_change());
+}
+
 fn is_composing(hwnd: HWND) -> bool {
     with_tsf(hwnd, |ctx| ctx.is_composing()).unwrap_or(false)
 }
@@ -445,7 +449,14 @@ unsafe extern "system" fn wnd_proc(
                     let mut app = app.lock().unwrap();
                     app.on_resize(width, height);
                 }
+                // リサイズでカーソルの画面座標が変わる → IME に再レイアウトを促す
+                notify_tsf_layout_change(hwnd);
             }
+            LRESULT(0)
+        }
+        WM_MOVE => {
+            // ウィンドウ移動でテキストの画面座標が変わる → IME に再レイアウトを促す
+            notify_tsf_layout_change(hwnd);
             LRESULT(0)
         }
         WM_CHAR | WM_SYSCHAR => {
@@ -687,6 +698,8 @@ unsafe extern "system" fn wnd_proc(
                         tab.term.scroll_display(alacritty_terminal::grid::Scroll::Delta(lines));
                         drop(app);
                         repaint(hwnd);
+                        // スクロールでカーソルの画面 Y が動く → IME に再レイアウトを促す
+                        notify_tsf_layout_change(hwnd);
                     }
             }
             LRESULT(0)
